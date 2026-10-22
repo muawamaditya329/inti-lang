@@ -1,0 +1,64 @@
+cmp 5, 3
+jl L1
+set r1, 0
+jmp C1
+L1: set r1, 1
+C1:
+cmp 3, 5
+jl L2
+set r2, 0
+jmp C2
+L2: set r2, 1
+C2:
+cmp 5, 5
+je L3
+set r3, 0
+jmp C3
+L3: set r3, 1
+C3:
+cmp 5, 5
+jne L4
+set r4, 0
+jmp C4
+L4: set r4, 1
+C4:
+cmp 5, 3
+jg L5
+set r5, 0
+jmp C5
+L5: set r5, 1
+C5:
+cmp 5, 5
+jle L6
+set r6, 0
+jmp C6
+L6: set r6, 1
+C6:
+cmp 3, 5
+jge L7
+set r7, 0
+jmp C7
+L7: set r7, 1
+C7:
+cmp -5, 3
+jl L8
+set r8, 0
+jmp C8
+L8: set r8, 1
+C8:
+printi r1
+printc 32
+printi r2
+printc 32
+printi r3
+printc 32
+printi r4
+printc 32
+printi r5
+printc 32
+printi r6
+printc 32
+printi r7
+printc 32
+printi r8
+printc 10

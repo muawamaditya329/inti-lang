@@ -1,0 +1,15 @@
+set buf, 0
+alloc buf, 4
+storeb buf, 79
+storeb buf+1, 75
+storeb buf+2, 10
+sys w, SYS_write, STDOUT, @buf, 3
+sys p, SYS_getpid
+cmp p, 0
+jg bagus
+printi 0
+jmp s
+bagus:
+printi 1
+s:
+printc 10

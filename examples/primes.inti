@@ -1,0 +1,35 @@
+# primes.inti — 20 bilangan prima pertama
+# Gabungan while terstruktur + lompatan mentah ala assembly
+
+set count, 0
+set cand, 2
+
+while count < 20 {
+    set is_prime, true
+    set d, 2
+
+    ulang_bagi:
+    mul sq, d, d          # sq = d*d (tak ada ekspresi: hitung dulu!)
+    cmp sq, cand
+    jg selesai_cek        # d*d > cand -> tak ada pembagi
+    mod r, cand, d
+    cmp r, 0
+    jne lanjut
+    set is_prime, false   # habis dibagi
+    jmp selesai_cek
+    lanjut:
+    add d, 1
+    jmp ulang_bagi
+
+    selesai_cek:
+    if is_prime {
+        printi cand
+        printc 32
+        add count, 1
+    }
+    add cand, 1
+}
+
+data nl, "\n"
+prints nl, 1
+exit 0

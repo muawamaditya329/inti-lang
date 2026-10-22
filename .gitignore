@@ -1,0 +1,11 @@
+# artefak build
+inti
+inti-cc
+bench/sum_c
+bench/fib_c
+bench/mem_c
+*.o
+*.elf
+intios/build/
+intios/intios.img
+*.ibin

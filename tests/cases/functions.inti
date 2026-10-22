@@ -1,0 +1,26 @@
+fn kali, a, b {
+    mul r, a, b
+    ret r
+}
+fn kosong {
+    ret
+}
+fn besar, n {
+    if n <= 0 { ret 0 }
+    set t, n
+    sub t, 1
+    call r, besar, t
+    add r, 1
+    ret r
+}
+call x, kali, 6, 7
+printi x
+printc 32
+call y, kosong
+printi y
+printc 32
+call z, besar, 9
+printi z
+printc 32
+call _, kali, 3, 3
+printc 10

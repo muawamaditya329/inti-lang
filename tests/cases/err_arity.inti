@@ -1,0 +1,4 @@
+fn f, a {
+    ret a
+}
+call x, f, 1, 2

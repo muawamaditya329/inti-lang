@@ -1,0 +1,69 @@
+name: ci
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build-test:
+    name: interpreter + compiler native (Linux x86-64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (gcc -O2 -Wall -Wextra)
+        run: make inti inti-cc
+
+      - name: Test interpreter (25 kasus nyata)
+        run: bash tests/run_tests.sh
+
+      - name: Test compiler native (25 kasus nyata)
+        run: bash tests/run_tests_cc.sh
+
+      - name: Ekuivalensi interpreter vs native (byte-per-byte)
+        run: bash tests/run_examples_cc.sh
+
+      - name: Audit freestanding (tanpa libc, syscall nyata)
+        run: bash tests/audit_native.sh
+
+      - name: Benchmark ringkas (best-of-5, fork+wait4)
+        run: |
+          make inti inti-cc >/dev/null 2>&1 || true
+          bash bench/run_bench_native.sh || true
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: inti-binaries
+          path: |
+            inti
+            inti-cc
+
+  intios-qemu:
+    name: IntiOS boot nyata di QEMU
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pasang QEMU (runner punya root)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          qemu-system-x86_64 --version | head -1
+
+      - name: Build compiler
+        run: make inti inti-cc
+
+      - name: Bangun image IntiOS (boot sector + kernel + program embedded)
+        run: bash intios/build.sh
+
+      - name: Boot nyata di QEMU + asersi serial + paritas byte-per-byte
+        run: bash intios/test_qemu.sh
+
+      - name: Upload artefak IntiOS
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intios
+          path: |
+            intios/intios.img
+            intios/build/serial.log
+            intios/build/qemu.err

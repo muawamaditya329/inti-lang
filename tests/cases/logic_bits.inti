@@ -1,0 +1,27 @@
+set a, 0xF0
+set b, 0x0F
+and x, a, b
+or y, a, b
+xor z, a, b
+not n1, a
+neg n2, a
+shl s1, a, 4
+set m16, -16
+shr s2, m16, 2
+sar s3, m16, 2
+printi x
+printc 32
+printi y
+printc 32
+printi z
+printc 32
+printi n1
+printc 32
+printi n2
+printc 32
+printi s1
+printc 32
+printi s2
+printc 32
+printi s3
+printc 10

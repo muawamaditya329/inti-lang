@@ -1,0 +1,16 @@
+set t, 7
+if t > 5 { printi 1 } else { printi 0 }
+printc 32
+if t < 5 { printi 1 } else { printi 0 }
+printc 32
+if t == 7 { printi 1 } else { printi 0 }
+printc 32
+if t != 7 { printi 1 } else { printi 0 }
+printc 32
+if t { printi 1 } else { printi 0 }
+printc 32
+set z, 0
+if z { printi 1 } else { printi 0 }
+printc 32
+if t == 8 { printi 8 } else if t == 7 { printi 77 } else { printi 0 }
+printc 10

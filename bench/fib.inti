@@ -1,0 +1,18 @@
+# bench/fib.inti — fibonacci rekursif fib(27)
+fn fib, n {
+    cmp n, 2
+    jl kecil
+    sub n, 1
+    call a, fib, n
+    sub n, 1
+    call b, fib, n
+    add r, a, b
+    ret r
+kecil:
+    ret n
+}
+call v, fib, 27
+printi v
+data nl, "\n"
+prints nl, 1
+exit 0

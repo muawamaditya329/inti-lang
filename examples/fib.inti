@@ -1,0 +1,28 @@
+# fib.inti — rekursi: deret Fibonacci
+# Fungsi bergaya assembly: parameter = "register" bernama
+
+fn fib, n {
+    cmp n, 2           # bandingkan, set flag
+    jl kecil           # n < 2 -> kasus dasar
+    sub n, 1
+    call a, fib, n     # fib(n-1)
+    sub n, 1
+    call b, fib, n     # fib(n-2)
+    add r, a, b
+    ret r
+kecil:
+    ret n
+}
+
+set i, 0
+ulang:
+    call v, fib, i
+    printi v
+    printc 32          # spasi
+    add i, 1
+    cmp i, 15
+    jl ulang
+
+data nl, "\n"
+prints nl, 1
+exit 0

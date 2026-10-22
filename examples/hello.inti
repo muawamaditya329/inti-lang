@@ -1,0 +1,16 @@
+# hello.inti — program pertama di bahasa Inti
+# Jalankan: ./inti examples/hello.inti
+
+data msg,  "Halo dari bahasa Inti!\n"     # label data = alamat di arena
+data nl,   "\n"
+
+slen len, msg          # panjang string otomatis dari label data
+prints msg, len        # tulis ke stdout lewat syscall write
+
+set a, 6
+set b, 7
+mul c, a, b            # c = a * b (bentuk 3 operand)
+printi c
+prints nl, 1
+
+exit 0

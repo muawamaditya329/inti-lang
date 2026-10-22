@@ -1,0 +1,10 @@
+set buf, 0
+alloc buf, 4096
+lagi:
+sys n, SYS_read, STDIN, @buf, 4096
+cmp n, 0
+jle s
+sys w, SYS_write, STDOUT, @buf, n
+jmp lagi
+s:
+exit 0

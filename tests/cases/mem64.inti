@@ -1,0 +1,28 @@
+set a, 0
+alloc a, 16
+set b, 0
+alloc b, 16
+set c, 0
+alloc c, 16
+store a, 111
+store b, 222
+store c, 333
+load v1, a
+printi v1
+printc 32
+load v2, b
+printi v2
+printc 32
+load v3, c
+printi v3
+printc 32
+free b
+set b2, 0
+alloc b2, 16
+sub diff, b2, b
+printi diff
+printc 32
+store b2, 999
+load v4, b2
+printi v4
+printc 10

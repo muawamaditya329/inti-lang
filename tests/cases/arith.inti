@@ -1,0 +1,25 @@
+set a, 17
+set b, 5
+add s, a, b
+sub d2, a, b
+mul m, a, b
+div q, a, b
+mod r, a, b
+set x, 100
+add x, 23
+sub x, 3
+mul x, 2
+div x, 7
+mod x, 8
+printi s
+printc 32
+printi d2
+printc 32
+printi m
+printc 32
+printi q
+printc 32
+printi r
+printc 32
+printi x
+printc 10

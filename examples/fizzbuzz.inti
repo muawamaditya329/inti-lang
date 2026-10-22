@@ -1,0 +1,35 @@
+# fizzbuzz.inti — 1..15, klasik
+# if / else if / else terstruktur
+
+data nl, "\n"
+
+set i, 1
+while i <= 15 {
+    mod r3, i, 3
+    mod r5, i, 5
+    cmp r3, 0
+    jne cek5
+    cmp r5, 0
+    jne cetak_fizz
+    prints fizzbuzz_s, 8
+    jmp lanjut
+    cek5:
+    cmp r5, 0
+    jne cetak_angka
+    prints buzz_s, 4
+    jmp lanjut
+    cetak_fizz:
+    prints fizz_s, 4
+    jmp lanjut
+    cetak_angka:
+    printi i
+    lanjut:
+    printc 32
+    add i, 1
+}
+prints nl, 1
+
+data fizz_s,    "Fizz"
+data buzz_s,    "Buzz"
+data fizzbuzz_s, "FizzBuzz"
+exit 0

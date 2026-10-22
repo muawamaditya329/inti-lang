@@ -1,0 +1,20 @@
+fn fib, n {
+    cmp n, 2
+    jl kecil
+    sub n, 1
+    call a, fib, n
+    sub n, 1
+    call b, fib, n
+    add r, a, b
+    ret r
+kecil:
+    ret n
+}
+set i, 0
+while i < 13 {
+    call v, fib, i
+    printi v
+    printc 32
+    add i, 1
+}
+printc 10

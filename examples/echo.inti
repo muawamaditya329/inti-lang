@@ -1,0 +1,16 @@
+# echo.inti — klon `cat` mini: baca stdin, tulis ke stdout
+# Syscall Linux ASLI (bukan simulasi): SYS_read=0, SYS_write=1
+# Jalankan:  echo "halo dunia" | ./inti examples/echo.inti
+
+set buf, 0
+alloc buf, 4096
+
+lagi:
+    sys n, SYS_read, STDIN, @buf, 4096   # n = byte terbaca
+    cmp n, 0
+    jle selesai                          # EOF / error
+    sys w, SYS_write, STDOUT, @buf, n    # tulis persis n byte
+    jmp lagi
+
+selesai:
+exit 0

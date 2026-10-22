@@ -1,0 +1,11 @@
+# bench/sum.inti — jumlah 1..100.000.000
+set i, 1
+set s, 0
+while i <= 100000000 {
+    add s, i
+    add i, 1
+}
+printi s
+data nl, "\n"
+prints nl, 1
+exit 0

@@ -1,0 +1,30 @@
+# time.inti — jam sistem via syscall clock_gettime(228) asli
+# struct timespec = 2 x int64: [detik, nanodetik]
+
+data nl, "\n"
+
+set ts, 0
+alloc ts, 16
+store ts, 0
+set t, ts
+add t, 8
+store t, 0
+
+sys r, SYS_clock_gettime, 0, @ts      # 0 = CLOCK_REALTIME
+
+load sec, ts
+printi sec                # detik sejak epoch (1970)
+prints nl, 1
+
+load nano, ts+8
+set juta, 1000000
+div ms, nano, juta
+printi ms                 # bagian milidetik
+prints nl, 1
+
+# PID proses ini — bukti komunikasi langsung dengan kernel
+sys pid, SYS_getpid
+printi pid
+prints nl, 1
+
+exit 0

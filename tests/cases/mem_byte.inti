@@ -1,0 +1,16 @@
+set buf, 0
+alloc buf, 8
+storeb buf, 73
+storeb buf+1, 78
+storeb buf+2, 84
+storeb buf+3, 73
+storeb buf+4, 45
+storeb buf+5, 54
+storeb buf+6, 52
+storeb buf+7, 10
+prints buf, 8
+storeb buf+7, 255
+loadb v, buf+7
+printi v
+printc 10
+free buf

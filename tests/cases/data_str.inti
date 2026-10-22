@@ -1,0 +1,6 @@
+slen n, pesan
+printi n
+printc 10
+prints pesan, 5
+prints pesan+5, 8
+data pesan, "Halo dunia!!\n"

@@ -1,0 +1,14 @@
+fn sum, n {
+    cmp n, 0
+    je base
+    set m, n
+    sub m, 1
+    call r, sum, m
+    add r, n
+    ret r
+base:
+    ret 0
+}
+call t, sum, 100000
+printi t
+printc 10

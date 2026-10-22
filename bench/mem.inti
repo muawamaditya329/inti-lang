@@ -1,0 +1,28 @@
+# bench/mem.inti — isi buffer 4 MiB byte-per-byte lalu jumlahkan
+set buf, 0
+alloc buf, 4194304
+set i, 0
+isi:
+    set t, buf
+    add t, i
+    set v, i
+    mul v, 7
+    and v, 255
+    storeb t, v
+    add i, 1
+    cmp i, 4194304
+    jl isi
+set s, 0
+set i, 0
+jumlah:
+    set t, buf
+    add t, i
+    loadb v, t
+    add s, v
+    add i, 1
+    cmp i, 4194304
+    jl jumlah
+printi s
+data nl, "\n"
+prints nl, 1
+exit 0

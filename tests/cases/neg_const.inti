@@ -1,0 +1,10 @@
+set a, -5
+set b, -0x10
+printi a
+printc 32
+printi b
+printc 32
+printi 'A'
+printc 32
+printc 'Z'
+printc 10
