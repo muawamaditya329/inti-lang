@@ -20,12 +20,28 @@ fi
 # ---------------- input serial (deterministik) ----------------
 printf 'help\nlist\nrun hello\nrun primes\nrun fib\nrun fizzbuzz\nrun memory\nrun echo\nsalam dari serial Inti\nbaris kedua\n\x04run tidakada\nmem\nperintah-lama\nshutdown\n' > build/input.txt
 
-echo "== boot QEMU (timeout 120s) =="
-timeout 120 "$QEMU" -m 256 -M pc -drive file=intios.img,format=raw,if=ide \
-    -boot c -display none -monitor none -serial stdio -no-reboot \
-    < build/input.txt > "$LOG" 2> "$ERR"
-RC=$?
-echo "qemu exit code: $RC"
+echo "== boot QEMU (timeout 120s, maks 3 percobaan) =="
+# Catatan: QEMU 8.x MTTCG punya race internal yang sesekali membuat QEMU
+# abort dgn asersi qemu_mutex_lock_iothread_impl (bug QEMU, bukan guest).
+# Mitigasi: thread=single + retry hanya jika pesan asersi itu muncul.
+boots=0
+while [ "$boots" -lt 3 ]; do
+    boots=$((boots+1))
+    timeout 120 "$QEMU" -m 256 -M pc -accel tcg,thread=single \
+        -drive file=intios.img,format=raw,if=ide \
+        -boot c -display none -monitor none -serial stdio -no-reboot \
+        -d cpu_reset \
+        < build/input.txt > "$LOG" 2> "$ERR"
+    RC=$?
+    echo "qemu exit code: $RC (percobaan $boots)"
+    if [ "$RC" -ne 134 ] || ! grep -q "qemu_mutex_lock_iothread_impl" "$ERR" 2>/dev/null; then
+        break                                     # bukan race MTTCG: jangan diulang
+    fi
+    echo "  QEMU kena bug race MTTCG (asersi BQL) — dicoba lagi..."
+done
+
+echo "== qemu.err (40 baris terakhir) =="
+tail -40 "$ERR" 2>/dev/null || true
 
 echo "== ringkasan log serial (30 baris akhir) =="
 tail -30 "$LOG"
@@ -36,7 +52,7 @@ bad()  { FAIL=$((FAIL+1)); echo "  [GAGAL] $1"; }
 check(){ grep -qF "$2" "$LOG" && ok "$1" || bad "$1"; }
 
 echo "== asersi boot =="
-check "marker boot sector (uart+disk+8 potongan+pmode+long mode)" "01234567kpl5"
+check "marker boot sector (uart+disk+8 potongan+pmode+salin+halaman+LME+PAE+PG+long)" "01234567kpctmagl5"
 check "kernel kmain jalan"                             "[intios] kmain"
 check "GDT/TSS/IDT/MSR terpasang"                      "[intios] GDT/TSS/IDT terpasang"
 check "banner IntiOS"                                  "IntiOS 0.1.0"

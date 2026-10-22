@@ -118,21 +118,13 @@ load_ok:
     /* ---- A20 (port cepat 0x92) ---- */
     in $0x92, %al
     or $0x02, %al
-    and $0xFE, %al
     out %al, $0x92
 
-    /* ---- GDT di memori rendah 0x500: null,kcode32(0x08),kdata(0x10),kcode64(0x18) --
-     * kode32 WAJIB L=0/D=1 (0xCF9A); kode64 terpisah L=1 (0xAF9A) selector 0x18.
-     * (Memakai deskriptor L=1 untuk fase 32-bit = fake long mode -> kacau.) */
-    movl $0x0000FFFF, 0x508     /* 0x08 kcode32: base=0, limit=4GB, L=0 D=1 */
-    movl $0x00CF9A00, 0x50C
-    movl $0x0000FFFF, 0x510     /* 0x10 kdata                               */
-    movl $0x00CF9200, 0x514
-    movl $0x0000FFFF, 0x518     /* 0x18 kcode64: L=1                        */
-    movl $0x00AF9A00, 0x51C
-    movw $0x1F, 0x520           /* GDTR.limit = 31 (4 deskriptor)           */
-    movl $0x00000500, 0x522     /* GDTR.base = 0x500                        */
-    lgdt 0x520
+    /* ---- GDT/GDTR = DATA ter-link (di bawah, sebelum padding) —
+     * alamat absolut 0x7C00+off dihitung linker. kode32 WAJIB L=0/D=1
+     * (0xCF9A); kode64 terpisah L=1 (0xAF9A) selector 0x18. (Memakai
+     * deskriptor L=1 untuk fase 32-bit = fake long mode -> kacau.) */
+    lgdt gdtr
 
     /* ---- masuk protected mode ---- */
     mov %cr0, %eax
@@ -160,6 +152,8 @@ pm32:
     mov $0x10000, %ecx
     cld
     rep movsl
+    mov $'c', %al           /* marker: 256 KB tersalin */
+    call sputc32
 
     /* ---- tabel halaman: identity 1 GB, halaman 2 MB, P|RW|US|PS ---- */
     mov $0x1000, %edi       /* nolkan PML4+PDPT+PD (0x1000..0x3FFF) */
@@ -178,19 +172,27 @@ pm32:
     loop 1b
     mov $0x1000, %eax
     mov %eax, %cr3
+    mov $'t', %al           /* marker: tabel halaman terpasang */
+    call sputc32
 
     /* ---- EFER.LME lalu CR0.PG|PAE ---- */
     mov $0xC0000080, %ecx   /* IA32_EFER          */
     rdmsr
     or $0x100, %eax         /* LME                */
     wrmsr
+    mov $'m', %al           /* marker: LME aktif  */
+    call sputc32
     /* ---- CR4.PAE (bit 5) WAJIB sebelum CR0.PG saat LME=1, lalu PG ---- */
     mov %cr4, %eax
     or $0x20, %eax          /* PAE                              */
     mov %eax, %cr4
+    mov $'a', %al           /* marker: PAE aktif  */
+    call sputc32
     mov %cr0, %eax
     or $0x80000000, %eax    /* PG saja — PAE BUKAN bit CR0!     */
     mov %eax, %cr0
+    mov $'g', %al           /* marker: paging/long mode aktif   */
+    call sputc32
     jmp 5f                  /* pecah TB: fetch segar setelah PG aktif */
 5:
     ljmp $0x18, $lm64
@@ -206,9 +208,9 @@ lm64:
     mov %ax, %gs
     mov $0x200000, %rsp     /* stack sementara (kernel juga pakai) */
     mov $'l', %al           /* marker: long mode    */
-    call sputc64
+    call sputc32
     mov $'5', %al
-    call sputc64
+    call sputc32
     mov $0x100000, %rax
     jmp *%rax               /* -> kstart64          */
 fail64:
@@ -218,42 +220,42 @@ fail64:
 /* ---------------- serial putc (16-bit) ----------------
  * AL = karakter; tunggu THR kosong (LSR bit 5) lalu kirim. */
 sputc:
-    mov %al, %bl
+    push %ax
     mov $0x3FD, %dx         /* LSR                  */
 1:
     in %dx, %al
     test $0x20, %al
     jz 1b
-    mov %bl, %al
+    pop %ax
     mov $0x3F8, %dx
     out %al, %dx
     ret
 
-/* ---------------- serial putc (32-bit) ---------------- */
+/* ---------------- serial putc (32-bit & 64-bit) ----------------
+ * Byte .code32 di bawah identik bila dieksekusi dlm mode 64-bit
+ * (hanya register rendah dgn operand imm32 — tanpa REX). */
 sputc32:
-    mov %al, %bl
+    push %ax
     mov $0x3FD, %edx
 2:
     in %dx, %al
     test $0x20, %al
     jz 2b
-    mov %bl, %al
+    pop %ax
     mov $0x3F8, %edx
     out %al, %dx
     ret
 
-/* ---------------- serial putc (64-bit) ---------------- */
-sputc64:
-    mov %al, %bl
-    mov $0x3FD, %edx
-3:
-    in %dx, %al
-    test $0x20, %al
-    jz 3b
-    mov %bl, %al
-    mov $0x3F8, %edx
-    out %al, %dx
-    ret
+/* ---------------- GDT + GDTR (data ter-link) ---------------- */
+gdt:
+    .quad 0x0000000000000000        /* 0x00 null                     */
+    .quad 0x00CF9A000000FFFF        /* 0x08 kode32: L=0 D=1 G=1      */
+    .quad 0x00CF92000000FFFF        /* 0x10 data                     */
+    .quad 0x00AF9A000000FFFF        /* 0x18 kode64: L=1 G=1          */
+gdt_end:
+gdtr:
+    .word gdt_end - gdt - 1         /* limit = 31                    */
+    .long gdt                       /* base absolut (linker)         */
 
 /* ---------------- padding + signature ---------------- */
     . = _boot + 510
