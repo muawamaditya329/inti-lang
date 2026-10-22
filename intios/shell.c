@@ -53,7 +53,15 @@ static void run_named(const char *name) {
             kmemcpy((void *)PROG_BASE, p->start, p->size);
             kprintf("=== %s: mulai (CPL3, %u byte) ===\n", name, p->size);
             g_last_exit = -1;
-            enter_user(PROG_BASE, ARENA_BASE, ARENA_SIZE);
+            /* .ibin: header 64B (magic u64 di +0, entry_off u32 di +8);
+             * kode nyata mulai di PROG_BASE + entry_off, bukan +0. */
+            uint32_t entry_off =
+                *(const uint32_t *)((const uint8_t *)p->start + 8);
+            if (entry_off >= p->size) {
+                kprintf("header rusak: entry_off=%u\n", entry_off);
+                return;
+            }
+            enter_user(PROG_BASE + entry_off, ARENA_BASE, ARENA_SIZE);
             kprintf("\n=== %s: selesai (exit=%d) ===\n", name, (int)g_last_exit);
             return;
         }

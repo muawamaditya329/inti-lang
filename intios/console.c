@@ -105,12 +105,24 @@ void kprintf(const char *fmt, ...) {
         p++;
         char pad = ' ';
         int width = 0;
+        int leftalign = 0;
+        if (*p == '-') { leftalign = 1; p++; }
         if (*p == '0') { pad = '0'; p++; }
         while (*p >= '0' && *p <= '9') { width = width * 10 + (*p - '0'); p++; }
         int lng = 0;
         while (*p == 'l') { lng++; p++; }
         switch (*p) {
-        case 's': put_str(__builtin_va_arg(ap, const char *)); break;
+        case 's': {
+            const char *s = __builtin_va_arg(ap, const char *);
+            int len = 0;
+            while (s[len]) len++;
+            if (!leftalign) {
+                while (width > len) { console_putc(pad); width--; }
+            }
+            put_str(s);
+            while (width > len) { console_putc(' '); width--; }
+            break;
+        }
         case 'c': console_putc((char)__builtin_va_arg(ap, int)); break;
         case 'd': {
             int64_t v = __builtin_va_arg(ap, int64_t);

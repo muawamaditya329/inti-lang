@@ -115,8 +115,11 @@ load_ok:
     mov $'k', %al           /* marker: kernel termuat   */
     call sputc
 
-    /* ---- A20 (port cepat 0x92) ---- */
+    /* ---- A20 (port cepat 0x92) ----
+     * WAJIB: bit0 = fast reset — kalau tidak dinolkan, tulis balik
+     * memicu CPU INIT asinkron (boot "mati" mendadak di tengah jalan). */
     in $0x92, %al
+    and $0xFE, %al
     or $0x02, %al
     out %al, $0x92
 
@@ -160,15 +163,19 @@ pm32:
     xor %eax, %eax
     mov $0xC00, %ecx
     rep stosl
-    movl $0x2003, 0x1000    /* PML4[0] -> PDPT                      */
-    movl $0x3003, 0x2000    /* PDPT[0] -> PD                        */
+    movl $0x2007, 0x1000    /* PML4[0] -> PDPT (P|RW|US — US WAJIB
+                               agar CPL3 bisa akses semua peta!)      */
+    movl $0x3007, 0x2000    /* PDPT[0] -> PD (P|RW|US)               */
     mov $0x3000, %edi
     mov $0x87, %eax         /* P|RW|US|PS, alamat 0                 */
     mov $0x200, %ecx        /* 512 entri x 2 MB = 1 GB              */
 1:
     movl %eax, (%edi)
+    movl $0, 4(%edi)        /* PENTING: entri long mode = 8 BYTE —
+                               tinggi harus 0, kalau tidak byte tinggi
+                               entri berikutnya jadi bit alamat sampah */
     add $0x200000, %eax
-    add $4, %edi
+    add $8, %edi
     loop 1b
     mov $0x1000, %eax
     mov %eax, %cr3

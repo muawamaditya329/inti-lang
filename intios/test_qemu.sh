@@ -18,7 +18,10 @@ fi
 [ -f intios.img ] || { echo "GAGAL: intios.img tidak ada — jalankan build.sh"; exit 1; }
 
 # ---------------- input serial (deterministik) ----------------
-printf 'help\nlist\nrun hello\nrun primes\nrun fib\nrun fizzbuzz\nrun memory\nrun echo\nsalam dari serial Inti\nbaris kedua\n\x04run tidakada\nmem\nperintah-lama\nshutdown\n' > build/input.txt
+# '\n' awal: SeaBIOS POST memakai COM1 untuk tes loopback dan bisa
+# menghabiskan byte pertama yang tertahan di FIFO — baris kosong ini
+# opsional bagi shell (diabaikan), jadi sisa input tetap utuh.
+printf '\nhelp\nlist\nrun hello\nrun primes\nrun fib\nrun fizzbuzz\nrun memory\nrun echo\nsalam dari serial Inti\nbaris kedua\n\x04run tidakada\nmem\nperintah-lama\nshutdown\n' > build/input.txt
 
 echo "== boot QEMU (timeout 120s, maks 3 percobaan) =="
 # Catatan: QEMU 8.x MTTCG punya race internal yang sesekali membuat QEMU
