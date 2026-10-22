@@ -24,9 +24,11 @@
 /* ---------------- titik masuk (BIOS melompat ke 0:0x7C00 = offset 0) ------ */
 _boot:
     jmp start
-    nop
 
-/* ---------------- DAP (Disk Address Packet) int 13h AH=42h ---------------- */
+/* ---------------- DAP (Disk Address Packet) int 13h AH=42h ----------------
+ * PENTING: DAP WAJIB di offset 2 (tepat setelah jmp 2-byte, alamat genap).
+ * Teruji di SeaBIOS/QEMU: DAP pada offset 3/4 menyebabkan panggilan kedua
+ * int 13h kacau (#UD storm — BIOS salah mengembalikan CS:IP). */
 dap:
     .word 0x0010            /* ukuran paket = 16                  */
 dap_cnt:
@@ -73,7 +75,8 @@ start:
     mov $'i', %al           /* marker serial: UART siap */
     call sputc
 
-    /* ---- baca 512 sektor (8 potongan x 64) -> 0x10000..0x4FFFF ---- */
+    /* ---- baca 512 sektor (8 potongan x 64) -> 0x10000..0x4FFFF ----
+     * LBA 1..512 — image wajib minimal 513 sektor (build.sh men-pad). */
     xor %bp, %bp            /* bp = nomor potongan 0..7 */
 load_chunk:
     /* LBA = 1 + bp*64 */
@@ -95,22 +98,20 @@ load_chunk:
     mov $0x42, %ah          /* extended read           */
     int $0x13
     jnc load_ok
-    mov $'E', %al           /* gagal baca disk          */
+    mov %bp, %ax            /* gagal baca disk: 'A'+bp */
+    add $'A', %al
     call sputc
 fail_hlt:
     hlt
     jmp fail_hlt
 load_ok:
-    mov $'.', %al
+    mov %bp, %ax            /* sukses: '0'+bp          */
+    add $'0', %al
     call sputc
     inc %bp
     cmp $8, %bp
     jb load_chunk
 
-    mov $'\r', %al
-    call sputc
-    mov $'\n', %al
-    call sputc
     mov $'k', %al           /* marker: kernel termuat   */
     call sputc
 
@@ -120,14 +121,18 @@ load_ok:
     and $0xFE, %al
     out %al, $0x92
 
-    /* ---- GDT di memori rendah 0x500: null,kcode(0x08),kdata(0x10) ---- */
-    movl $0x0000FFFF, 0x508     /* kcode: base=0, limit=0xFFFFF, 0xAF9A */
-    movl $0x00AF9A00, 0x50C
-    movl $0x0000FFFF, 0x510     /* kdata: 0xCF92                        */
+    /* ---- GDT di memori rendah 0x500: null,kcode32(0x08),kdata(0x10),kcode64(0x18) --
+     * kode32 WAJIB L=0/D=1 (0xCF9A); kode64 terpisah L=1 (0xAF9A) selector 0x18.
+     * (Memakai deskriptor L=1 untuk fase 32-bit = fake long mode -> kacau.) */
+    movl $0x0000FFFF, 0x508     /* 0x08 kcode32: base=0, limit=4GB, L=0 D=1 */
+    movl $0x00CF9A00, 0x50C
+    movl $0x0000FFFF, 0x510     /* 0x10 kdata                               */
     movl $0x00CF9200, 0x514
-    movw $0x17, 0x518           /* GDTR.limit = 23                      */
-    movl $0x00000500, 0x51A     /* GDTR.base = 0x500                    */
-    lgdt 0x518
+    movl $0x0000FFFF, 0x518     /* 0x18 kcode64: L=1                        */
+    movl $0x00AF9A00, 0x51C
+    movw $0x1F, 0x520           /* GDTR.limit = 31 (4 deskriptor)           */
+    movl $0x00000500, 0x522     /* GDTR.base = 0x500                        */
+    lgdt 0x520
 
     /* ---- masuk protected mode ---- */
     mov %cr0, %eax
@@ -152,7 +157,7 @@ pm32:
     /* ---- salin image kernel 0x10000 -> 0x100000 (256 KB = 0x8000 dword) ---- */
     mov $0x10000, %esi
     mov $0x100000, %edi
-    mov $0x8000, %ecx
+    mov $0x10000, %ecx
     cld
     rep movsl
 
@@ -179,10 +184,16 @@ pm32:
     rdmsr
     or $0x100, %eax         /* LME                */
     wrmsr
+    /* ---- CR4.PAE (bit 5) WAJIB sebelum CR0.PG saat LME=1, lalu PG ---- */
+    mov %cr4, %eax
+    or $0x20, %eax          /* PAE                              */
+    mov %eax, %cr4
     mov %cr0, %eax
-    or $0x80010000, %eax    /* PG | PAE           */
+    or $0x80000000, %eax    /* PG saja — PAE BUKAN bit CR0!     */
     mov %eax, %cr0
-    ljmp $0x08, $lm64
+    jmp 5f                  /* pecah TB: fetch segar setelah PG aktif */
+5:
+    ljmp $0x18, $lm64
 
 /* ================= long mode 64-bit ================= */
     .code64
@@ -193,8 +204,10 @@ lm64:
     mov %ax, %ss
     mov %ax, %fs
     mov %ax, %gs
-    mov $0x200000, %esp     /* stack sementara (kernel juga pakai) */
+    mov $0x200000, %rsp     /* stack sementara (kernel juga pakai) */
     mov $'l', %al           /* marker: long mode    */
+    call sputc64
+    mov $'5', %al
     call sputc64
     mov $0x100000, %rax
     jmp *%rax               /* -> kstart64          */

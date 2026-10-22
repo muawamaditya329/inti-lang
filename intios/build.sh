@@ -46,5 +46,5 @@ echo "   boot.bin: 512 byte, signature $(xxd -p -s 510 -l 2 build/boot.bin 2>/de
 
 echo "== [4/4] susun image disk =="
 cat build/boot.bin build/kernel.bin > intios.img
-truncate -s 262144 intios.img
+truncate -s 262656 intios.img   # 513 sektor: boot + 512 sektor kernel
 echo "SELESAI: intios/intios.img ($(stat -c%s intios.img) byte)"

@@ -80,7 +80,7 @@ void cpu_init(void) {
     outb_(0xA1, 0xFF);
 
     /* GDT */
-    gdt_put(1, 0x00AF9A000000FFFFuLL);    /* 0x08 kernel code */
+    gdt_put(1, 0x00AF9A000000FFFFuLL);    /* 0x08 kernel code 64-bit (L=1) */
     gdt_put(2, 0x00CF92000000FFFFuLL);    /* 0x10 kernel data */
     gdt_put(3, 0x00AFFA000000FFFFuLL);    /* 0x18 user code   */
     gdt_put(4, 0x00CFF2000000FFFFuLL);    /* 0x20 user data   */
@@ -89,7 +89,17 @@ void cpu_init(void) {
     gdtr.base = (uint64_t)(uintptr_t)gdt;
     lgdt_(&gdtr);
 
-    /* segmen data aman (CS tetap 0x08 dari boot — deskriptor identik) */
+    /* reload CS: CS masih menunjuk deskriptor kode32 (L=0) dari GDT boot —
+     * wajib dimuat ulang agar cache deskriptor = kode 64-bit milik kernel */
+    __asm__ volatile (
+        "lea 1f(%%rip), %%rax\n"
+        "push $0x08\n"
+        "push %%rax\n"
+        "lretq\n"
+        "1:\n"
+        ::: "ax", "memory", "cc");
+
+    /* segmen data */
     __asm__ volatile (
         "mov $0x10, %%ax\n"
         "mov %%ax, %%ds\n"

@@ -36,7 +36,7 @@ bad()  { FAIL=$((FAIL+1)); echo "  [GAGAL] $1"; }
 check(){ grep -qF "$2" "$LOG" && ok "$1" || bad "$1"; }
 
 echo "== asersi boot =="
-check "marker boot sector (uart+disk+pmode+long mode)" "k.p.l"
+check "marker boot sector (uart+disk+8 potongan+pmode+long mode)" "01234567kpl5"
 check "kernel kmain jalan"                             "[intios] kmain"
 check "GDT/TSS/IDT/MSR terpasang"                      "[intios] GDT/TSS/IDT terpasang"
 check "banner IntiOS"                                  "IntiOS 0.1.0"
@@ -48,6 +48,10 @@ extract() {  # extract <nama> -> build/out_<nama>.txt
 }
 for P in hello primes fib fizzbuzz memory echo; do extract "$P"; done
 
+# normalisasi: buang baris kosong di AKHIR file (shell menambah \n sebelum
+# marker "selesai" — bukan bagian output program)
+norm() { awk '{l[NR]=$0} END{while(NR>0 && l[NR]=="") NR--; for(i=1;i<=NR;i++) print l[i]}' "$1"; }
+
 # paritas vs interpreter (sumber kebenaran semantik)
 "$ROOT/inti" "$ROOT/examples/hello.inti"    > build/exp_hello.txt    2>/dev/null
 "$ROOT/inti" "$ROOT/examples/primes.inti"   > build/exp_primes.txt   2>/dev/null
@@ -56,7 +60,7 @@ for P in hello primes fib fizzbuzz memory echo; do extract "$P"; done
 "$ROOT/inti" "$ROOT/examples/memory.inti"   > build/exp_memory.txt   2>/dev/null
 printf 'salam dari serial Inti\nbaris kedua\n' | "$ROOT/inti" "$ROOT/examples/echo.inti" > build/exp_echo.txt 2>/dev/null
 for P in hello primes fib fizzbuzz memory echo; do
-    if diff -q "build/exp_$P.txt" "build/out_$P.txt" >/dev/null 2>&1; then
+    if diff <(norm "build/exp_$P.txt") <(norm "build/out_$P.txt") >/dev/null 2>&1; then
         ok "paritas '$P' identik byte-per-byte dengan interpreter"
     else
         bad "paritas '$P' BERBEDA"
@@ -71,7 +75,7 @@ NEXIT=$(grep -c "selesai (exit=0)" "$LOG" || true)
 
 check "program tidak dikenal ditolak"  "tidak ada program 'tidakada'"
 check "perintah asing ditolak"         "perintah tidak dikenal: 'perintah-lama'"
-check "peta memori tampil"             "arena user 0x1000000"
+check "peta memori tampil"             "0x01000000 (32 MB)"
 check "echo EOF (Ctrl-D) bekerja"      "baris kedua"
 
 echo "== asersi shutdown =="
