@@ -1,5 +1,7 @@
 # Inti — bahasa tingkat rendah untuk komunikasi langsung dengan hardware
 
+[![CI](https://github.com/muawamaditya329/inti-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/muawamaditya329/inti-lang/actions/workflows/ci.yml)
+
 **Inti** adalah bahasa pemrograman bergaya assembly untuk Linux x86-64. Filosofinya:
 *apa yang Anda tulis itulah yang dieksekusi* — tanpa garbage collector, tanpa boxing
 angka, tanpa alokasi memori tersembunyi, tanpa dependensi. Program Inti berbicara

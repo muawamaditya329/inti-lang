@@ -58,27 +58,37 @@ Dikerjakan sesuai rencana dan teruji:
   executable", readelf tanpa INTERP/DYNAMIC, syscall nyata, error runtime
   tertangani runtime sendiri).
 
-## Fase 3 — IntiOS: mini-kernel yang booting nyata
+## Fase 3 — IntiOS: mini-kernel yang booting nyata — **✔ SELESAI**
 
-Mulai menulis OS di atas hardware emulasi yang **mengeksekusi kode asli**
-(QEMU = eksekusi nyata, bukan simulasi logika; pengujian akhir di hardware
-USB-boot):
+IntiOS v0.1.0 **boot BIOS nyata** (tanpa GRUB/Limine — boot sector buatan
+sendiri) dan **teruji di QEMU via GitHub Actions CI/CD**:
 
-1. Boot: pakai bootloader siap pakai (Limine/GRUB Multiboot2); kernel Inti
-   masuk long mode 64-bit.
-2. Driver dasar: framebuffer VGA/VBE (cetak karakter), keyboard PS/2
-   (scancode → buffer), timer PIT (tick).
-3. Interrupt & memori: IDT, GDT, handler IRQ; alokator frame fisik +
-   paging; malloc kernel dari Fase 2.
-4. Scheduler: kooperatif dulu, lalu preemptive (quantum dari PIT).
-5. Syscall antara ring 3 ↔ ring 0 (int 0x80 atau syscall/sysret).
-6. FS sederhana: FAT16 read-only → ramfs read-write.
+1. ✔ Boot: boot sector 512 byte buatan sendiri (int13h extended read LBA
+   8×64 sektor, A20 port 0x92, GDT, PM32, paging 2MB identity 1GB,
+   EFER.LME, long mode 64-bit) — kernel ter-load di 0x100000.
+2. ✔ Driver dasar: VGA teks 80×25 + UART COM1 (dual output untuk CI),
+   keyboard PS/2 scancode set 1 + input serial, polling murni (PIC
+   dimask penuh).
+3. ✔ Interrupt & memori: GDT/TSS/IDT 256 gate, arena user 32MB first-fit
+   (algoritme identik dgn interpreter), identity map 1GB P|RW|US.
+4. Scheduler: — (belum; single-tasking, shell kooperatif).
+5. ✔ Syscall ring 3 ↔ ring 0: instruksi **SYSCALL/SYSRET nyata**
+   (EFER.SCE, LSTAR, STAR, FMASK), nomor kompatibel Linux
+   (read=0, write=1, exit=60), ENOSYS utk sisanya.
+6. FS sederhana: — (belum; program di-embed ke image kernel via
+   inti-cc --target=intios, flat binary .ibin 64B header).
 
-Milestone teruji: boot QEMU, mengetik di layar, dua proses bergantian,
-proses userspace memanggil syscall IntiOS. Setiap milestone punya skrip
-uji otomatis (QEMU + serial log dibandingkan dengan ekspektasi).
+Milestone teruji: **19/19 asersi** — boot nyata di QEMU 8.2 (CI GitHub)
+dan 10.0 (lokal), shell interaktif via serial, 6 program Inti (hello,
+primes, fib, fizzbuzz, memory, echo) dieksekusi CPL3 dan output-nya
+**identik byte-per-byte dengan interpreter**, exception (#DE/#UD/#GP/#PF)
+dilaporkan lalu kembali ke shell, shutdown ACPI S5 keluar bersih.
 
-Estimasi: 6–18 bulan bagian tersulit sekaligus paling mendidik.
+Bug nyata yang ditemukan & diperbaiki di Fase 3 (semua terdokumentasi
+di commit): DAP int13h harus di offset genap, deskriptor kode32 vs kode64
+terpisah (L=0/D=1 vs L=1), CR4.PAE wajib sebelum CR0.PG, entri tabel
+halaman long mode 8 byte (bukan 4!), bit U/S wajib di SEMUA level (PML4/
+PDPT/PD) agar CPL3 bisa akses, entry .ibin = PROG_BASE+entry_off.
 
 ## Fase 4 — Ekosistem minimal
 

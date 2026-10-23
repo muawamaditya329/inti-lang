@@ -1,10 +1,15 @@
-# IntiOS — Mini-Kernel Bahasa Inti (Fase 3 ROADMAP-OS)
+# IntiOS — Mini-Kernel Bahasa Inti (Fase 3 ROADMAP-OS) — **✔ SELESAI**
 
 IntiOS adalah mini-kernel x86-64 yang **boot nyata dari BIOS** — bukan
 simulasi, bukan program Linux. Image disk 256 KB berisi boot sector 512 byte,
 kernel 64-bit, dan program-program Inti yang ter-embed. Diuji otomatis di
 GitHub Actions dengan QEMU (`intios-test`), dan bisa dijalankan di mesin
 x86-64 nyata melalui boot USB/disk (mode BIOS legacy).
+
+**Status: 19/19 asersi lulus** — QEMU 8.2 (GitHub Actions CI/CD) dan
+QEMU 10.0 (uji lokal). Enam program Inti dieksekusi CPL3 via instruksi
+SYSCALL/SYSRET nyata; output terverifikasi identik byte-per-byte dengan
+interpreter Inti.
 
 ```
 make intios        # bangun intios/intios.img (butuh inti-cc, gcc, gas, ld)
