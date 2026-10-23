@@ -1,0 +1,28 @@
+set a, 0xF0
+and a, 0x3C
+printi a
+printc 10
+set b, 0xF0
+or b, 0x0F
+printi b
+printc 10
+set c, 0xFF
+xor c, 0x0F
+printi c
+printc 10
+set d, 5
+not d
+printi d
+printc 10
+set e, 1
+shl e, 10
+printi e
+printc 10
+set f, -16
+shr f, 2
+printi f
+printc 10
+set g, -16
+sar g, 2
+printi g
+printc 10

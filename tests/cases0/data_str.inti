@@ -1,0 +1,11 @@
+data pesan, "Halo dari Inti/0!\n"
+data biner, "AB"
+prints pesan, 18
+slen n, pesan
+printi n
+printc 10
+slen m, biner
+printi m
+printc 10
+printc 65
+printc 10

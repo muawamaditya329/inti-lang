@@ -1,0 +1,25 @@
+set i, 0
+while i < 10 {
+    add i, 1
+    if i == 3 {
+        continue
+    }
+    if i == 8 {
+        break
+    }
+    printi i
+    printc 32
+}
+printc 10
+set j, 0
+while j < 3 {
+    set k, 0
+    while k < 2 {
+        printi j
+        printi k
+        printc 32
+        add k, 1
+    }
+    add j, 1
+}
+printc 10

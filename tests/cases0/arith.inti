@@ -1,0 +1,22 @@
+set a, 17
+add a, 25
+sub a, 10
+mul a, 3
+printi a
+printc 10
+set b, 100
+div b, 7
+printi b
+printc 10
+set c, 100
+mod c, 7
+printi c
+printc 10
+set d, -13
+add d, 5
+printi d
+printc 10
+set e, 0xFF
+add e, 0b101
+printi e
+printc 10

@@ -1,0 +1,16 @@
+jmp mulai
+belakang:
+printi 9
+printc 10
+exit 0
+mulai:
+set i, 0
+ulang:
+cmp i, 3
+jge selesai
+printi i
+printc 32
+add i, 1
+jmp ulang
+selesai:
+jmp belakang

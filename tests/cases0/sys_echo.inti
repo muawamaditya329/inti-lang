@@ -1,0 +1,4 @@
+data buf, 256
+sys n, SYS_read, STDIN, @buf, 256
+sys _, SYS_write, STDOUT, @buf, n
+exit 0

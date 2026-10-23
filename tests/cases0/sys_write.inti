@@ -1,0 +1,6 @@
+data teks, "syscall langsung\n"
+sys n, SYS_write, STDOUT, @teks, 17
+printi n
+printc 10
+sys _, SYS_write, STDERR, @teks, 0
+exit 9

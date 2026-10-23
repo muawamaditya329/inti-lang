@@ -1,0 +1,19 @@
+data buf, "XXXXXXXXXXXXXXXX"
+set p, buf
+storeb p, 73
+storeb buf+1, 78
+storeb buf+2, 84
+storeb buf+3, 73
+loadb c, buf
+printi c
+printc 32
+loadb d, buf+3
+printi d
+printc 10
+data angka, 8
+storeb angka+7, 255
+loadb e, angka+7
+printi e
+printc 10
+prints buf, 4
+printc 10

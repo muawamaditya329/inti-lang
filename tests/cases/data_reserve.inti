@@ -1,0 +1,8 @@
+data buf, 16
+storeb buf+15, 255
+loadb v, buf+15
+printi v
+printc 10
+slen n, buf
+printi n
+printc 10

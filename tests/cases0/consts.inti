@@ -1,0 +1,6 @@
+data p, "k\n"
+sys _, SYS_write, STDOUT, @p, 2
+printi true
+printc 32
+printi false
+printc 10

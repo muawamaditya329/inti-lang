@@ -1,0 +1,18 @@
+set a, -9223372036854775808
+set b, -1
+div a, b
+printi a
+printc 10
+set c, -9223372036854775808
+set d, -1
+mod c, d
+printi c
+printc 10
+set e, -17
+div e, 5
+printi e
+printc 10
+set f, -17
+mod f, 5
+printi f
+printc 10

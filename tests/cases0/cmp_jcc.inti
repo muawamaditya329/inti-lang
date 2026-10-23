@@ -1,0 +1,16 @@
+set a, 5
+cmp a, 5
+je sama
+printi 0
+jmp selesai
+sama:
+printi 111
+selesai:
+cmp a, 3
+jl kecil
+printi 2
+jmp akhir
+kecil:
+printi 1
+akhir:
+printc 10

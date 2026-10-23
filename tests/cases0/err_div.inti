@@ -1,0 +1,4 @@
+set a, 5
+div a, 2
+printi a
+printc 10

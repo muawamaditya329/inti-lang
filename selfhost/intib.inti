@@ -1,0 +1,5474 @@
+# ============================================================================
+# intib.inti — INTI-BOOTSTRAP-COMPILER (Inti/0 -> .ibin)
+#
+# Compiler bahasa Inti yang DITULIS 100% DALAM BAHASA INTI (subset "Inti/0").
+# Membaca sumber Inti/0 dari stdin, menghasilkan nlat binary .ibin (ABI
+# IntiOS, sama seperti inti-cc --target=intios) — di Linux ditulis ke stdout,
+# di dalam IntiOS diserahkan ke shell lewat syscall 1000 (SYS_putbin).
+#
+# Rantai nixed point:
+#   inti-cc (C)  -> intib (ELF native)
+#   intib        -> intib2.ibin   (mengompilasi SOURCE DIRINYA SENDIRI)
+#   intib2.ibin  -> intib3.ibin   (intib2 mengompilasi dirinya lagi)
+#   intib2.ibin == intib3.ibin    (titik tetap; codegen deterministik)
+#
+# Inti/0 = subset Inti: set/add/sub/mul/div/mod/and/or/xor/shl/shr/sar/neg/
+# not, cmp+jmp/jcc, label:, if/else/while/break/continue, fn/call/ret,
+# load/store/loadb/storeb, sys, printi/prints/printc/slen, exit, data.
+# Belum didukung: alloc/nree, bentuk 3-operand ALU, data di dalam fn.
+#
+# DISIPLIN GAYA FILE INI (Inti/0 murni):
+#  - label data = ALAMAT arena; isi hanya lewat load/store/loadb/storeb
+#  - G+off dipakai sebagai operan alamat (const), bukan operand nilai
+#  - tanpa alloc/nree, tanpa bentuk 3-operand, tanpa data di dalam fn
+# ============================================================================
+
+# ---------------- buffer & tabel intib (alamat arena, statis) ----------------
+data G, 768            # slot global intib (peta di bawah)
+data SRC, 262144       # sumber Inti/0 dari stdin
+data TOK, 524288       # token 32768 x 16B: slotA kind|line<<32, slotB val|sid
+data STRP, 131072      # pool string ter-intern
+data STRO, 32768       # entri string 4096 x 8B: off u32 | len u32<<32
+data HASH, 16384       # hash string 2048 slot x 8B (0=kosong, else sid+1)
+data OUTB, 524288      # image keluaran: header 64B + kode + pad + globals 16B
+data GENIMG, 65536     # data image program HASIL (GFA@0, GFB@8, user@16)
+data FNT, 10240        # fungsi program hasil 256 x 40B (name,arity,start,ptab,bodytk)
+data PTAB, 32768       # sid parameter 4096 x 8B (nlat, onnset per fn)
+data DLT, 12288        # label data program hasil 512 x 24B
+data FIX, 131072       # nixup 4096 x 32B (site, kind, tgt, line)
+data LBT, 16384        # label per-fn 1024 x 16B (id, codeonn)
+data LOOPS, 1024       # loop aktin 64 x 16B (cont codeonn?, idx loop utk break)
+data DEFN, 4096        # flag slot terdeninisi (1B per slot)
+data VNT, 65536        # nama variabel per fn: 4096 x 16B (sid, slot)
+data PROBE, 8          # buffer probe syscall 1000
+data DIGB, 32          # buffer digit print_num / __printi
+data TBUF, 4096        # buffer unescape lexer & debug
+
+# ---------------- pesan & nragmen error intib ----------------
+data M_HDR,  "inti: error (baris "
+data M_COL,  "): "
+data M_NL,   "\n"
+data E_EMPTY,"sumber kosong\n"
+data E_CHR,  "karakter tidak dikenal\n"
+data E_CHR2, "\n"
+data E_STRL, "string literal tidak ditutup\n"
+data E_CHRL, "karakter literal tidak ditutup\n"
+data E_NUMF, "angka tidak valid\n"
+data E_DST,  "tujuan harus variabel atau '_'\n"
+data E_UNK,  "nama tidak dikenal: '"
+data E_UNK2, "'\n"
+data E_OPC,  "instruksi tidak dikenal: '"
+data E_OPC2, "'\n"
+data E_LBLD, "label '"
+data E_LBLD2,"' ganda\n"
+data E_LBLU, "label '"
+data E_LBLU2,"' tidak dikenal\n"
+data E_FNU,  "fungsi tidak dikenal: '"
+data E_FNU2, "'\n"
+data E_ARI,  "jumlah argumen 'call' salah\n"
+data E_LOOP, "'break'/'continue' di luar loop while\n"
+data E_BRL,  "'{' diharapkan setelah kondisi/fn\n"
+data E_BRB,  "'}' tidak seimbang\n"
+data E_ELN,  "pernyataan harus diakhiri baris baru atau '}'\n"
+data E_AT,   "'@' tidak valid di sini\n"
+data E_NEG,  "tanda '-' hanya untuk literal angka\n"
+data E_JMP,  "diharapkan nama label setelah lompatan\n"
+data E_CALL, "'call' butuh tujuan, nama fungsi, dan argumen\n"
+data E_FNX,  "terlalu banyak fungsi (maks 256)\n"
+data E_DLX,  "terlalu banyak label data (maks 512)\n"
+data E_TKX,  "terlalu banyak token\n"
+data E_STX,  "pool string penuh\n"
+data E_FXX,  "terlalu banyak nixup\n"
+data E_LBX,  "terlalu banyak label dalam satu nungsi\n"
+data E_OBX,  "keluaran kode melebihi bunner\n"
+data E_GIX,  "data program hasil melebihi bunner\n"
+data E_ALC,  "'alloc'/'nree' belum didukung Inti/0 (pakai buffer 'data')\n"
+data E_SYS,  "'sys' maksimal 6 argumen\n"
+data E_PTN,  "operand tidak valid\n"
+data E_WR,   "gagal menulis keluaran\n"
+data E_DAT,  "'data' hanya boleh di tingkat atas\n"
+data E_STO,  "alamat store tidak boleh '_'\n"
+data B_SYS_READ,  "SYS_read"
+data B_SYS_WRITE, "SYS_write"
+data B_SYS_OPEN,  "SYS_open"
+data B_SYS_CLOSE, "SYS_close"
+data B_SYS_EXIT,  "SYS_exit"
+data B_SYS_CLOCK, "SYS_clock_gettime"
+data B_STDIN,  "STDIN"
+data B_STDOUT, "STDOUT"
+data B_STDERR, "STDERR"
+data B_TRUE,   "true"
+data B_FALSE,  "nalse"
+
+# kata kunci (dibandingkan lewat streq_l)
+data K_FN,     "fn"
+data K_RET,    "ret"
+data K_IF,     "if"
+data K_ELSE,   "else"
+data K_WHILE,  "while"
+data K_BREAK,  "break"
+data K_CONT,   "continue"
+data K_DATA,   "data"
+data K_CALL,   "call"
+data K_CMP,    "cmp"
+data K_JMP,    "jmp"
+data K_JE,     "je"
+data K_JNE,    "jne"
+data K_JL,     "jl"
+data K_JLE,    "jle"
+data K_JG,     "jg"
+data K_JGE,    "jge"
+data K_SET,    "set"
+data K_ADD,    "add"
+data K_SUB,    "sub"
+data K_MUL,    "mul"
+data K_DIV,    "div"
+data K_MOD,    "mod"
+data K_AND,    "and"
+data K_OR,     "or"
+data K_XOR,    "xor"
+data K_SHL,    "shl"
+data K_SHR,    "shr"
+data K_SAR,    "sar"
+data K_NEG,    "neg"
+data K_NOT,    "not"
+data K_LOAD,   "load"
+data K_STORE,  "store"
+data K_LOADB,  "loadb"
+data K_STOREB, "storeb"
+data K_SYS,    "sys"
+data K_PRINTI, "printi"
+data K_PRINTS, "prints"
+data K_PRINTC, "printc"
+data K_SLEN,   "slen"
+data K_EXIT,   "exit"
+data K_ALLOC,  "alloc"
+data K_FREE,   "nree"
+data K_UNDER,  "_"
+
+# ---------------- peta slot G (semua 8B, alamat = G+off) ----------------
+#   0 srclen    8 ntok     16 tpos    24 fnf     32 ndl     40 pc
+#  48 ndata    56 nnix    64 nlbl    72 nloops  80 nstr    88 synlbl
+#  96 curnn   104 nslots 112 arity  120 mode   128 ea     136 ptab_n
+# 144 dimgpos 152 outlim 160 tk_kind 168 tk_val 176 tk_sid 184 tk_len
+# 192 ok_kind 200 ok_val 208 ok_onn 216 ok_sid   (hasil parse_operand)
+# 224 t0      232 t1     240 t2     248 t3       (scratch antar-fn)
+# 256 c0      264 c1     272 c2     280 c3       (scratch lokal-global)
+# 288 curline 296 sysctx
+
+# konstanta jenis token:
+#  0=EOF 1=NL 2=IDENT 3=NUM 4=CHAR 5=STR 6=COMMA 7=COLON 8=LBRACE 9=RBRACE
+# 10=LT 11=LE 12=GT 13=GE 14=EQ 15=NE 16=AT 17=MINUS
+# konstanta nixup:
+#  1=label user rel32   2=label sintetis rel32   3=call fn rel32
+#  4=break pending      5=abs32 vaddr data image 6=abs32 vaddr globals
+# opcode sintetis internal (untuk walker):
+#  100=set 101=add 102=sub 103=mul 104=div 105=mod 106=and 107=or 108=xor
+#  109=shl 110=shr 111=sar 112=neg 113=not 114=load 115=store 116=loadb
+#  117=storeb 118=printi 119=prints 120=printc 121=slen 122=exit
+#  123=cmp 124=jmp 125=je 126=jne 127=jl 128=jle 129=jg 130=jge
+#  131=call 132=ret 133=sys 134=break 135=continue 136=if 137=while
+
+# ================================ DRIVER ================================
+main_start:
+load t0, G+152
+cmp t0, 0                # (jaga-jaga; outlim konstanta)
+set t1, 0
+
+# probe target keluaran: syscall 1000 ada = IntiOS; -38 (ENOSYS) = Linux
+sys t0, 1000, @PROBE, 0
+store G+120, t0
+cmp t0, 0
+jge mode_intios
+set t0, 0
+store G+120, t0
+jmp mode_done
+mode_intios:
+set t0, 1
+store G+120, t0
+mode_done:
+
+# ---------------- baca seluruh stdin ke SRC ----------------
+set t0, 0
+store G+0, t0
+read_loop:
+sys t0, SYS_read, STDIN, @SRC, 262128
+cmp t0, 0
+jle read_done
+load t1, G+0
+add t1, t0
+store G+0, t1
+cmp t1, 262128
+jge read_done
+jmp read_loop
+read_done:
+load t1, G+0
+cmp t1, 0
+jne src_ok
+slen t_e, E_EMPTY
+call _, die_lbl, E_EMPTY, t_e
+src_ok:
+
+set t, 0
+store G+712, t
+call _, intern_keywords
+call _, intern_builtins
+call _, lex_all
+call _, pass1_collect
+call _, emit_program
+call _, write_image
+exit 0
+
+# ================================ BANTU UMUM ================================
+
+# die_lbl(lab) — pesan tanpa baris: "inti: error: msg\n" lalu exit 1
+
+
+fn die_lbl, lab, len {
+    printc 105
+    printc 110
+    printc 116
+    printc 105
+    printc 58
+    printc 32
+    printc 101
+    printc 114
+    printc 114
+    printc 111
+    printc 114
+    printc 58
+    printc 32
+    set t_d, len
+    sys _, SYS_write, STDERR, @lab, t_d
+    exit 1
+
+# die_line(lab, line) — "inti: error (baris N): msg\n" lalu exit 1
+
+}
+fn die_line, lab, len, line {
+    slen t_h, M_HDR
+    sys _, SYS_write, STDERR, @M_HDR, t_h
+    call _, print_num, line
+    slen t_c, M_COL
+    sys _, SYS_write, STDERR, @M_COL, t_c
+    set t_d, len
+    sys _, SYS_write, STDERR, @lab, t_d
+    exit 1
+
+# die_line2(lab, sid, line) — seperti die_line + nama 'sid' + lanjutan lab2
+# dipakai utk pesan ber-pola: lab + '<nama>' + lab2  (dua nragmen)
+
+}
+fn die_line2, lab, llen, sid, lab2, llen2, line {
+    slen t_h, M_HDR
+    sys _, SYS_write, STDERR, @M_HDR, t_h
+    call _, print_num, line
+    slen t_c, M_COL
+    sys _, SYS_write, STDERR, @M_COL, t_c
+    set t_d, llen
+    sys _, SYS_write, STDERR, @lab, t_d
+    call _, print_sid, sid
+    set t_d2, llen2
+    sys _, SYS_write, STDERR, @lab2, t_d2
+    exit 1
+
+# print_sid(sid) — tulis isi string ter-intern ke stderr
+
+}
+fn print_sid, sid {
+    call _, s_addr, sid         # G+224 = off, G+232 = len
+    load t_o, G+224
+    load t_l, G+232
+    set t_p, STRP
+    add t_p, t_o
+    sys _, SYS_write, STDERR, @t_p, t_l
+    ret 0
+
+# print_num(v) — int64 desimal tanpa newline (negatin & nol ditangani)
+
+}
+fn print_num, v {
+    set x, v
+    set n, 0
+    cmp x, 0
+    jge pn_zero
+    printc 45
+    neg x
+pn_zero:
+    cmp x, 0
+    jne pn_loop
+    printc 48
+    ret 0
+pn_loop:
+    set r, x
+    mod r, 10
+    div x, 10
+    set c, 48
+    add c, r
+    set p, 31
+    sub p, n
+    set pa, DIGB
+    add pa, p
+    storeb pa, c
+    add n, 1
+    cmp x, 0
+    jg pn_loop
+    set pa, DIGB
+    set t, 32
+    sub t, n
+    add pa, t
+    sys _, SYS_write, STDERR, @pa, n
+    ret 0
+
+# s_addr(sid) -> G+224 = off pool, G+232 = len
+
+}
+fn s_addr, sid {
+    set i, sid
+    shl i, 3
+    set a, STRO
+    add a, i
+    load e, a
+    set off, e
+    set m, 4294967295
+    and off, m
+    set l, e
+    shr l, 32
+    store G+224, off
+    store G+232, l
+    ret 0
+
+# streq_l(sid, lab) -> G+224 = 1 bila string sid sama dengan isi label lab
+
+}
+fn streq_l, sid, lab, len {
+    call _, s_addr, sid
+    load o, G+224
+    load l, G+232
+    set wl, len
+    cmp l, wl
+    jne st_no
+    set j, 0
+st_loop:
+    cmp j, l
+    jge st_yes
+    set p, STRP
+    add p, o
+    add p, j
+    loadb a, p
+    set q, lab
+    add q, j
+    loadb b, q
+    cmp a, b
+    jne st_no
+    add j, 1
+    jmp st_loop
+st_yes:
+    set t, 1
+    store G+224, t
+    ret 1
+st_no:
+    set t, 0
+    store G+224, t
+    ret 0
+
+# intern_keywords — intern semua kata kunci BERURUTAN -> sid = indeks
+# peta: 0=fn 1=ret 2=if 3=else 4=while 5=break 6=continue 7=data 8=call
+#       9=cmp 10=jmp 11=je 12=jne 13=jl 14=jle 15=jg 16=jge 17=set
+#       18=add 19=sub 20=mul 21=div 22=mod 23=and 24=or 25=xor 26=shl
+#       27=shr 28=sar 29=neg 30=not 31=load 32=store 33=loadb 34=storeb
+#       35=sys 36=printi 37=prints 38=printc 39=slen 40=exit 41=alloc
+#       42=nree 43=_
+}
+fn intern_keywords {
+    slen t, K_FN
+    call _, intern, K_FN, t
+    slen t, K_RET
+    call _, intern, K_RET, t
+    slen t, K_IF
+    call _, intern, K_IF, t
+    slen t, K_ELSE
+    call _, intern, K_ELSE, t
+    slen t, K_WHILE
+    call _, intern, K_WHILE, t
+    slen t, K_BREAK
+    call _, intern, K_BREAK, t
+    slen t, K_CONT
+    call _, intern, K_CONT, t
+    slen t, K_DATA
+    call _, intern, K_DATA, t
+    slen t, K_CALL
+    call _, intern, K_CALL, t
+    slen t, K_CMP
+    call _, intern, K_CMP, t
+    slen t, K_JMP
+    call _, intern, K_JMP, t
+    slen t, K_JE
+    call _, intern, K_JE, t
+    slen t, K_JNE
+    call _, intern, K_JNE, t
+    slen t, K_JL
+    call _, intern, K_JL, t
+    slen t, K_JLE
+    call _, intern, K_JLE, t
+    slen t, K_JG
+    call _, intern, K_JG, t
+    slen t, K_JGE
+    call _, intern, K_JGE, t
+    slen t, K_SET
+    call _, intern, K_SET, t
+    slen t, K_ADD
+    call _, intern, K_ADD, t
+    slen t, K_SUB
+    call _, intern, K_SUB, t
+    slen t, K_MUL
+    call _, intern, K_MUL, t
+    slen t, K_DIV
+    call _, intern, K_DIV, t
+    slen t, K_MOD
+    call _, intern, K_MOD, t
+    slen t, K_AND
+    call _, intern, K_AND, t
+    slen t, K_OR
+    call _, intern, K_OR, t
+    slen t, K_XOR
+    call _, intern, K_XOR, t
+    slen t, K_SHL
+    call _, intern, K_SHL, t
+    slen t, K_SHR
+    call _, intern, K_SHR, t
+    slen t, K_SAR
+    call _, intern, K_SAR, t
+    slen t, K_NEG
+    call _, intern, K_NEG, t
+    slen t, K_NOT
+    call _, intern, K_NOT, t
+    slen t, K_LOAD
+    call _, intern, K_LOAD, t
+    slen t, K_STORE
+    call _, intern, K_STORE, t
+    slen t, K_LOADB
+    call _, intern, K_LOADB, t
+    slen t, K_STOREB
+    call _, intern, K_STOREB, t
+    slen t, K_SYS
+    call _, intern, K_SYS, t
+    slen t, K_PRINTI
+    call _, intern, K_PRINTI, t
+    slen t, K_PRINTS
+    call _, intern, K_PRINTS, t
+    slen t, K_PRINTC
+    call _, intern, K_PRINTC, t
+    slen t, K_SLEN
+    call _, intern, K_SLEN, t
+    slen t, K_EXIT
+    call _, intern, K_EXIT, t
+    slen t, K_ALLOC
+    call _, intern, K_ALLOC, t
+    slen t, K_FREE
+    call _, intern, K_FREE, t
+    slen t, K_UNDER
+    call _, intern, K_UNDER, t
+    ret 0
+}
+
+# intern(bun_addr, len) -> G+224 = sid (pemindaian linier atas STRO)
+fn intern, baddr, len {
+    # pemindaian linier atas STRO (sederhana & pasti — cukup utk bootstrap)
+    set i, 0
+in_scan:
+    load ns, G+80
+    cmp i, ns
+    jge in_new
+    set q, i
+    shl q, 3
+    set a, STRO
+    add a, q
+    load e, a
+    set o, e
+    set m, 4294967295
+    and o, m
+    set l, e
+    shr l, 32
+    cmp l, len
+    jne in_next
+    set j, 0
+in_cmp:
+    cmp j, l
+    jge in_hit
+    set p, STRP
+    add p, o
+    add p, j
+    loadb a2, p
+    set q2, baddr
+    add q2, j
+    loadb b2, q2
+    cmp a2, b2
+    jne in_next
+    set t, j
+    add t, 1
+    set j, t
+    jmp in_cmp
+in_hit:
+    store G+224, i
+    ret i
+in_next:
+    set t, i
+    add t, 1
+    set i, t
+    jmp in_scan
+in_new:
+    load ns, G+80
+    cmp ns, 4000
+    jge in_null
+    load off, G+712      # penunjuk tulis pool (incremental)
+    set dst, STRP
+    add dst, off
+    set j, 0
+in_cp:
+    cmp j, len
+    jge in_cpd
+    set p, baddr
+    add p, j
+    loadb c, p
+    storeb dst, c
+    set t, j
+    add t, 1
+    set j, t
+    add dst, 1
+    jmp in_cp
+in_cpd:
+    set e, len
+    shl e, 32
+    add e, off
+    set a, STRO
+    set t, ns
+    shl t, 3
+    add a, t
+    store a, e
+    set t, ns
+    add t, 1
+    store G+80, t
+    load w7, G+712
+    add w7, len
+    store G+712, w7      # majukan penunjuk pool
+    store G+224, ns
+    ret ns
+in_null:
+    slen t_e, E_STX
+    call _, die_lbl, E_STX, t_e
+}
+fn is_digit, c {
+    set x, c
+    cmp x, 48
+    jl isd_no
+    cmp x, 57
+    jg isd_no
+    set t, 1
+    store G+224, t
+    ret 1
+isd_no:
+    set t, 0
+    store G+224, t
+    ret 0
+
+# is_alpha(c) -> hurun atau '_'
+
+}
+fn is_alpha, c {
+    set x, c
+    cmp x, 65          # 'A'
+    jl isa_us
+    cmp x, 90          # 'Z'
+    jg isa_lo
+    jmp isa_yes
+isa_lo:
+    cmp x, 97          # 'a'
+    jl isa_us
+    cmp x, 122         # 'z'
+    jg isa_us
+isa_yes:
+    set t, 1
+    store G+224, t
+    ret 1
+isa_us:
+    cmp x, 95          # '_'
+    jne isa_no
+    set t, 1
+    store G+224, t
+    ret 1
+isa_no:
+    set t, 0
+    store G+224, t
+    ret 0
+
+# esc_val(c) -> G+224 = nilai byte escape, -1 bila tak dikenal
+
+}
+fn esc_val, c {
+    set x, c
+    set t, -1
+    store G+224, t
+    cmp x, 110         # 'n'
+    jne ev1
+    set t, 10
+    store G+224, t
+    ret 0
+ev1:
+    cmp x, 116         # 't'
+    jne ev2
+    set t, 9
+    store G+224, t
+    ret 0
+ev2:
+    cmp x, 114         # 'r'
+    jne ev3
+    set t, 13
+    store G+224, t
+    ret 0
+ev3:
+    cmp x, 48          # '0'
+    jne ev4
+    set t, 0
+    store G+224, t
+    ret 0
+ev4:
+    cmp x, 92          # '\'
+    jne ev5
+    set t, 92
+    store G+224, t
+    ret 0
+ev5:
+    cmp x, 34          # '"'
+    jne ev6
+    set t, 34
+    store G+224, t
+    ret 0
+ev6:
+    cmp x, 35          # '#'
+    jne ev7
+    set t, 35
+    store G+224, t
+    ret 0
+ev7:
+    cmp x, 39          # '\''
+    jne ev8
+    set t, 39
+    store G+224, t
+    ret 0
+ev8:
+    ret 0
+
+# tok_push(kind, aux, line)
+
+}
+fn tok_push, kind, aux, line {
+    load n, G+8
+    cmp n, 32768
+    jl tp_ok
+    slen t_e, E_TKX
+    call _, die_lbl, E_TKX, t_e
+tp_ok:
+    cmp n, 32768
+    jl tp_room
+    call _, die_lbl, E_TKX, t_e
+tp_room:
+    set a, n
+    shl a, 4           # x16
+    set p, TOK
+    add p, a
+    set k, kind
+    set l, line
+    shl l, 32
+    add k, l
+    store p, k
+    add p, 8
+    set v, aux
+    store p, v
+    add n, 1
+    store G+8, n
+    ret 0
+
+# lex_all — sumber -> token (NL berturut dilebur; EOF = kind 0)
+
+}
+fn lex_all {
+    store G+8, 0
+    set pos, 0
+    set line, 1
+lx_top:
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_eon
+    set p, SRC
+    add p, pos
+    loadb c, p
+    # spasi / tab / CR
+    cmp c, 32
+    je lx_adv
+    cmp c, 9
+    je lx_adv
+    cmp c, 13
+    je lx_adv
+    # baris baru
+    cmp c, 10
+    jne lx_hash
+    call _, tok_push, 1, 0, line
+    set t, line
+    add t, 1
+    set line, t
+    set t, pos
+    add t, 1
+    set pos, t
+    # lebur NL berturut
+lx_eatnl:
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_top
+    set p, SRC
+    add p, pos
+    loadb c, p
+    cmp c, 10
+    jne lx_top
+    set t, line
+    add t, 1
+    set line, t
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_eatnl
+lx_adv:
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_top
+lx_hash:
+    cmp c, 35          # '#'
+    jne lx_str
+lx_skip:
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_top
+    set p, SRC
+    add p, pos
+    loadb c, p
+    cmp c, 10
+    je lx_top
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_skip
+lx_str:
+    cmp c, 34          # '"'
+    jne lx_char
+    set t, pos
+    add t, 1
+    set pos, t
+    set n, 0
+lx_st_loop:
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_st_unc
+    set p, SRC
+    add p, pos
+    loadb c, p
+    cmp c, 34
+    je lx_st_end
+    cmp c, 92          # '\'
+    jne lx_st_plain
+    set t, pos
+    add t, 1
+    set pos, t
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_st_unc
+    set p, SRC
+    add p, pos
+    loadb c, p
+    call _, esc_val, c
+    load v, G+224
+    cmp v, -1
+    jne lx_st_esc
+    slen t_e, E_CHR
+    call _, die_line, E_CHR, t_e, line
+lx_st_esc:
+    set p, TBUF
+    add p, n
+    storeb p, v
+    set t, n
+    add t, 1
+    set n, t
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_st_loop
+lx_st_plain:
+    set p, TBUF
+    add p, n
+    storeb p, c
+    set t, n
+    add t, 1
+    set n, t
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_st_loop
+lx_st_end:
+    set t, pos
+    add t, 1
+    set pos, t         # lewati tanda kutip penutup
+    call _, intern, TBUF, n
+    load sid, G+224
+    set aux, n
+    shl aux, 32
+    add aux, sid
+    call _, tok_push, 5, aux, line
+    jmp lx_top
+lx_st_unc:
+    slen t_e, E_STRL
+    call _, die_line, E_STRL, t_e, line
+lx_char:
+    cmp c, 39          # '\''
+    jne lx_num0
+    set t, pos
+    add t, 1
+    set pos, t
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_ch_unc
+    set p, SRC
+    add p, pos
+    loadb c, p
+    cmp c, 92          # '\'
+    jne lx_ch_1
+    set t, pos
+    add t, 1
+    set pos, t
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_ch_unc
+    set p, SRC
+    add p, pos
+    loadb c, p
+    call _, esc_val, c
+    load v, G+224
+    cmp v, -1
+    jne lx_ch_esc
+    slen t_e, E_CHR
+    call _, die_line, E_CHR, t_e, line
+lx_ch_esc:
+    load v, G+224
+    jmp lx_ch_have
+lx_ch_1:
+    set v, c
+lx_ch_have:
+    set t, pos
+    add t, 1
+    set pos, t
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_ch_unc
+    set p, SRC
+    add p, pos
+    loadb c2, p
+    cmp c2, 39
+    jne lx_ch_unc
+    set t, pos
+    add t, 1
+    set pos, t
+    call _, tok_push, 4, v, line
+    jmp lx_top
+lx_ch_unc:
+    slen t_e, E_CHRL
+    call _, die_line, E_CHRL, t_e, line
+lx_num0:
+    call _, is_digit, c
+    load d, G+224
+    cmp d, 1
+    jne lx_minus
+    # angka: 0x hex, 0b bin, desimal
+    set v, 0
+    set p, SRC
+    add p, pos
+    loadb c, p
+    cmp c, 48          # '0'
+    jne lx_dec
+    set t, pos
+    add t, 1
+    load slen_, G+0
+    cmp t, slen_
+    jge lx_dec2
+    set p, SRC
+    add p, t
+    loadb c2, p
+    cmp c2, 120        # 'x'
+    je lx_hex
+    cmp c2, 98         # 'b'
+    je lx_bin
+    jmp lx_dec
+lx_dec2:
+    jmp lx_dec
+lx_hex:
+    set t, pos
+    add t, 2
+    set pos, t
+    set v, 0
+lx_hex_loop:
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_num_end
+    set p, SRC
+    add p, pos
+    loadb c, p
+    call _, hexval, c
+    load d, G+224
+    cmp d, -1
+    je lx_num_end
+    set t, v
+    shl t, 4
+    add t, d
+    set v, t
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_hex_loop
+lx_bin:
+    set t, pos
+    add t, 2
+    set pos, t
+    set v, 0
+lx_bin_loop:
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_num_end
+    set p, SRC
+    add p, pos
+    loadb c, p
+    cmp c, 48
+    je lx_bin_1
+    cmp c, 49
+    je lx_bin_1
+    jmp lx_num_end
+lx_bin_1:
+    set t, v
+    shl t, 1
+    cmp c, 49
+    jne lx_bin_0
+    add t, 1
+lx_bin_0:
+    set v, t
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_bin_loop
+lx_dec:
+    set v, 0
+lx_dec_loop:
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_num_end
+    set p, SRC
+    add p, pos
+    loadb c, p
+    call _, is_digit, c
+    load d, G+224
+    cmp d, 1
+    jne lx_num_end
+    set t, v
+    mul t, 10
+    set u, c
+    sub u, 48
+    add t, u
+    set v, t
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_dec_loop
+lx_num_end:
+    call _, tok_push, 3, v, line
+    jmp lx_top
+lx_minus:
+    cmp c, 45          # '-'
+    jne lx_ident
+    # '-' hanya bila diikuti digit -> MINUS (parser jadikan negasi literal)
+    set t, pos
+    add t, 1
+    set p2, SRC
+    add p2, t
+    loadb c2, p2
+    call _, is_digit, c2
+    load d, G+224
+    cmp d, 1
+    jne lx_sym
+    call _, tok_push, 17, 0, line
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_top
+lx_ident:
+    call _, is_alpha, c
+    load d, G+224
+    cmp d, 1
+    jne lx_sym
+    set n, 0
+lx_id_loop:
+    load slen_, G+0
+    cmp pos, slen_
+    jge lx_id_end
+    set p, SRC
+    add p, pos
+    loadb c, p
+    call _, is_alpha, c
+    load d, G+224
+    cmp d, 1
+    je lx_id_take
+    call _, is_digit, c
+    load d, G+224
+    cmp d, 1
+    jne lx_id_end
+lx_id_take:
+    set p, TBUF
+    add p, n
+    storeb p, c
+    set t, n
+    add t, 1
+    set n, t
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_id_loop
+lx_id_end:
+    call _, intern, TBUF, n
+    load sid, G+224
+    set aux, n
+    shl aux, 32
+    add aux, sid
+    call _, tok_push, 2, aux, line
+    jmp lx_top
+lx_sym:
+    # simbol 1-2 karakter
+    cmp c, 60          # '<'
+    jne lx_s2
+    store G+280, pos
+    call _, sym2, 61, 11, 10, line    # '<=' LE(11) else LT(10)
+    load pos, G+280
+    jmp lx_top
+lx_s2:
+    cmp c, 62          # '>'
+    jne lx_s3
+    store G+280, pos
+    call _, sym2, 61, 13, 12, line    # '>=' GE(13) else GT(12)
+    load pos, G+280
+    jmp lx_top
+lx_s3:
+    cmp c, 61          # '='
+    jne lx_s4
+    store G+280, pos
+    call _, sym2, 61, 14, -1, line    # '==' EQ else error
+    load pos, G+280
+    jmp lx_top
+lx_s4:
+    cmp c, 33          # '!'
+    jne lx_s5
+    store G+280, pos
+    call _, sym2, 61, 15, -1, line    # '!=' NE else error
+    load pos, G+280
+    jmp lx_top
+lx_s5:
+    set k, -1
+    cmp c, 44          # ','
+    jne lx_c1
+    set k, 6
+    jmp lx_sym_push
+lx_c1:
+    cmp c, 43          # '+'
+    jne lx_c1b
+    set k, 18
+    jmp lx_sym_push
+lx_c1b:
+    cmp c, 58          # ':'
+    jne lx_c2
+    set k, 7
+    jmp lx_sym_push
+lx_c2:
+    cmp c, 123         # '{'
+    jne lx_c3
+    set k, 8
+    jmp lx_sym_push
+lx_c3:
+    cmp c, 125         # '}'
+    jne lx_c4
+    set k, 9
+    jmp lx_sym_push
+lx_c4:
+    cmp c, 64          # '@'
+    jne lx_c5
+    set k, 16
+    jmp lx_sym_push
+lx_c5:
+    slen t_e, E_CHR
+    call _, die_line, E_CHR, t_e, line
+lx_sym_push:
+    cmp k, -1
+    jne lx_sym_go
+    slen t_e, E_PTN
+    call _, die_line, E_PTN, t_e, line
+lx_sym_go:
+    call _, tok_push, k, 0, line
+    set t, pos
+    add t, 1
+    set pos, t
+    jmp lx_top
+lx_eon:
+    call _, tok_push, 0, 0, line
+    ret 0
+
+# sym2(nxt, k_yes, k_no, line) — konsumsi 1-2 karakter simbol
+# pos dibaca/ditulis via G+280 (dipanggil dari lex_all)
+# k_no = -1 -> error karakter tidak dikenal
+
+}
+fn sym2, nxt, k_yes, k_no, line {
+    load slen_, G+0
+    load pos, G+280
+    set t, pos
+    add t, 1
+    set two, 0
+    cmp t, slen_
+    jge sy_eval
+    set p, SRC
+    add p, t
+    loadb c2, p
+    set x, nxt
+    cmp c2, x
+    jne sy_eval
+    set two, 1
+sy_eval:
+    cmp two, 1
+    jne sy_one
+    call _, tok_push, k_yes, 0, line
+    set t, pos
+    add t, 2
+    store G+280, t
+    ret 0
+sy_one:
+    set k, k_no
+    cmp k, -1
+    jne sy_push
+    slen t_e, E_CHR
+    call _, die_line, E_CHR, t_e, line
+sy_push:
+    call _, tok_push, k, 0, line
+    set t, pos
+    add t, 1
+    store G+280, t
+    ret 0
+
+# hexval(c) -> G+224 = 0..15 atau -1
+
+}
+fn hexval, c {
+    set x, c
+    set t, -1
+    store G+224, t
+    cmp x, 48
+    jl hv_no
+    cmp x, 57
+    jg hv_an
+    sub x, 48
+    store G+224, x
+    ret 0
+hv_an:
+    cmp x, 65          # 'A'
+    jl hv_no
+    cmp x, 70          # 'F'
+    jg hv_ln
+    sub x, 55
+    store G+224, x
+    ret 0
+hv_ln:
+    cmp x, 97          # 'a'
+    jl hv_no
+    cmp x, 102         # 'n'
+    jg hv_no
+    sub x, 87
+    store G+224, x
+    ret 0
+hv_no:
+    ret 0
+
+}
+# ======================== AKSES TOKEN ========================
+
+# tkload(idx) -> G+160 kind, G+168 val/aux, G+176 sid, G+184 len, G+288 line
+fn tkload, idx {
+    set q, idx
+    shl q, 4
+    set p, TOK
+    add p, q
+    load a, p
+    set k, a
+    set m, 4294967295
+    and k, m
+    set l, a
+    shr l, 32
+    store G+160, k
+    store G+288, l
+    add p, 8
+    load b, p
+    # IDENT/STR: aux = len<<32 | sid
+    set sid, b
+    and sid, m
+    set len, b
+    shr len, 32
+    # NUM/CHAR memakai 64-bit penuh; IDENT/STR hanya 32+32
+    store G+168, b
+    store G+176, sid
+    store G+184, len
+    ret 0
+}
+
+# tnext — maju satu token
+fn tnext {
+    load t, G+16
+    add t, 1
+    store G+16, t
+    ret 0
+}
+
+# cur_kind / cur_line — wrapper kecil (hasil tkload terakhir)
+# konvensi: pemanggil selalu tkload(G+16) sebelum membaca G+160/288
+
+# ======================== PASS 1: KUMPUL FN & DATA ========================
+
+# nn_reg(sid) -> G+224 = indeks fn baru (tanpa cek dup di sini)
+fn fn_find, sid {
+    set i, 0
+nn_loop:
+    load n, G+24
+    cmp i, n
+    jge nn_no
+    set q, i
+    set t5, 5
+    mul q, t5
+    shl q, 3            # x40
+    set p, FNT
+    add p, q
+    load s, p
+    cmp s, sid
+    je nn_yes
+    set t, i
+    add t, 1
+    set i, t
+    jmp nn_loop
+nn_yes:
+    store G+224, i
+    ret i
+nn_no:
+    set t, -1
+    store G+224, t
+    ret -1
+}
+
+# dl_find(sid) -> G+224 = indeks DLT atau -1
+fn dl_find, sid {
+    set i, 0
+dn_loop:
+    load n, G+32
+    cmp i, n
+    jge dn_no
+    set q, i
+    set t, 3
+    mul q, t
+    shl q, 3          # x24 = x3 x8
+    set p, DLT
+    add p, q
+    load s, p
+    cmp s, sid
+    je dn_yes
+    set t, i
+    add t, 1
+    set i, t
+    jmp dn_loop
+dn_yes:
+    store G+224, i
+    ret i
+dn_no:
+    set t, -1
+    store G+224, t
+    ret -1
+}
+
+# dl_addr(idx) -> G+224 = addr, G+232 = len
+fn dl_addr, idx {
+    set q, idx
+    set t, 3
+    mul q, t
+    shl q, 3
+    set p, DLT
+    add p, q
+    add p, 8
+    load a, p
+    add p, 8
+    load l, p
+    store G+224, a
+    store G+232, l
+    ret 0
+}
+
+# pass1_collect — pindai tingkat atas: fn header + data; stmt __main__ dilewati
+fn pass1_collect {
+    # __main__ = fn 0 (tanpa nama, arity 0); fn user mulai indeks 1
+    set t, 1
+    store G+24, t
+    set t, 0
+    store G+48, t       # ndata = 0 (GENIMG 0..127 area internal)
+    set t, 128
+    store G+48, t       # user data mulai onnset 128 (GFA/GFB/MSGS/DIGB internal)
+    set t, 0
+    store G+136, t      # ptab_n
+    store G+16, t       # tpos
+p1_top:
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 0
+    je p1_done
+    cmp k, 1
+    je p1_adv
+    cmp k, 2
+    jne p1_skip
+    # IDENT: fn / data / lainnya
+    load sid, G+176
+    cmp sid, 0          # K_FN
+    je p1_nn
+    cmp sid, 7          # K_DATA
+    je p1_data
+    jmp p1_skip
+p1_nn:
+    call _, p1_fn_header
+    jmp p1_top
+p1_data:
+    call _, p1_data_decl
+    jmp p1_top
+p1_skip:
+    # lewati sampai NL/EOF (stmt __main__ ditangani pass2)
+p1_skip_loop:
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 1
+    je p1_adv
+    cmp k, 0
+    je p1_done
+    call _, tnext
+    jmp p1_skip_loop
+p1_adv:
+    call _, tnext
+    jmp p1_top
+p1_done:
+    ret 0
+}
+
+# p1_fn_header — 'fn' nama, p1, p2 { ... } (badan dilewati via brace count)
+fn p1_fn_header {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 2
+    je p1n_name
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+p1n_name:
+    load sid, G+176
+    call _, fn_find, sid
+    load r, G+224
+    cmp r, -1
+    je p1n_new
+    slen t_e, E_LBLD
+    slen t_n, E_LBLD2
+    load ln, G+288
+    call _, die_line2, E_LBLD, t_e, sid, E_LBLD2, t_n, ln
+p1n_new:
+    load n, G+24
+    cmp n, 256
+    jl p1n_room
+    slen t_e, E_FNX
+    call _, die_lbl, E_FNX, t_e
+p1n_room:
+    set q, n
+    set t5, 5
+    mul q, t5
+    shl q, 3            # x40
+    set p, FNT
+    add p, q
+    store p, sid        # +0 name sid
+    set t, n
+    add t, 1
+    store G+24, t       # fnf++
+    set t, 0
+    add p, 16
+    store p, t          # +16 start (diisi saat emit)
+    add p, 8
+    load t, G+136
+    store p, t          # +24 ptab_onn (sebelum param diurai)
+    # parameter
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    set arity, 0
+    load po, G+136
+p1n_params:
+    cmp k, 6            # COMMA
+    jne p1n_endparam
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 2
+    je p1n_pname
+    load ln, G+288
+    slen t_e, E_BRL
+    call _, die_line, E_BRL, t_e, ln
+p1n_pname:
+    load psid, G+176
+    set q, po
+    shl q, 3
+    set pp, PTAB
+    add pp, q
+    store pp, psid
+    set t, po
+    add t, 1
+    set po, t
+    store G+136, po
+    set t, arity
+    add t, 1
+    set arity, t
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    jmp p1n_params
+p1n_endparam:
+    cmp k, 8            # LBRACE
+    je p1n_body
+    load ln, G+288
+    slen t_e, E_BRL
+    call _, die_line, E_BRL, t_e, ln
+p1n_body:
+    set q, n
+    set t5, 5
+    mul q, t5
+    shl q, 3            # x40
+    set p, FNT
+    add p, q
+    add p, 8
+    store p, arity      # FNT+8 arity
+    call _, tnext       # lewati LBRACE -> tpos = awal badan
+    load tk2, G+16
+    add p, 24           # FNT+32 bodytk (dari +8)
+    store p, tk2
+    # lewati badan sampai '}' seimbang
+    set depth, 1
+p1n_scan:
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 0
+    jne p1n_s1
+    call _, die_lbl, E_BRB, t_e
+p1n_s1:
+    cmp k, 8
+    jne p1n_s2
+    set t, depth
+    add t, 1
+    set depth, t
+    call _, tnext
+    jmp p1n_scan
+p1n_s2:
+    cmp k, 9
+    jne p1n_s3
+    set t, depth
+    sub t, 1
+    set depth, t
+    call _, tnext
+    cmp depth, 0
+    je p1n_done
+    jmp p1n_scan
+p1n_s3:
+    call _, tnext
+    jmp p1n_scan
+p1n_done:
+    ret 0
+}
+
+# p1_data_decl — data nama, "str" | N (hanya tingkat atas)
+fn p1_data_decl {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 2
+    je p1d_name
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+p1d_name:
+    load sid, G+176
+    call _, dl_find, sid
+    load r, G+224
+    cmp r, -1
+    je p1d_new
+    slen t_e, E_LBLD
+    slen t_n, E_LBLD2
+    load ln, G+288
+    call _, die_line2, E_LBLD, t_e, sid, E_LBLD2, t_n, ln
+p1d_new:
+    load n, G+32
+    cmp n, 512
+    jl p1d_room
+    slen t_e, E_DLX
+    call _, die_lbl, E_DLX, t_e
+p1d_room:
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 6            # COMMA
+    je p1d_comma
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+p1d_comma:
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 5            # STR
+    je p1d_str
+    cmp k, 3            # NUM (cadangan N byte nol)
+    je p1d_num
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+p1d_str:
+    load len, G+184
+    load addr, G+48     # ndata
+    load ssid, G+176    # sid STRING pada token berjalan
+    call _, s_addr, ssid
+    load off, G+224
+    set sp, STRP
+    add sp, off
+    set dp, GENIMG
+    add dp, addr
+    set j, 0
+p1d_cp:
+    cmp j, len
+    jge p1d_cpd
+    set q, sp
+    add q, j
+    loadb c, q
+    set q, dp
+    add q, j
+    storeb q, c
+    set t, j
+    add t, 1
+    set j, t
+    jmp p1d_cp
+p1d_cpd:
+    set t, addr
+    add t, len
+    store G+48, t       # ndata += len
+    call _, tnext       # lewati STR
+    jmp p1d_reg
+p1d_num:
+    load v, G+168
+    cmp v, 0
+    jl p1d_bad
+    set lim, 16777216
+    cmp v, lim
+    jg p1d_bad
+    load addr, G+48
+    set t, addr
+    add t, v
+    store G+48, t       # GENIMG sudah nol -> cukup maju
+    call _, tnext
+    jmp p1d_reg
+p1d_bad:
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+p1d_reg:
+    # dantarkan DLT[ndl] = (sid, addr, len)
+    load n, G+32
+    set q, n
+    set t, 3
+    mul q, t
+    shl q, 3
+    set p, DLT
+    add p, q
+    store p, sid
+    add p, 8
+    store p, addr
+    add p, 8
+    load l2, G+184      # len utk STR; utk NUM ambil dari v
+    # (v masih berisi nilai NUM bila jalur num; STR sudah lewat tnext —
+    #  simpan len di G+232 oleh jalur str; utk kesederhanaan hitung ulang)
+    # gunakan: len = ndata_baru - addr
+    load nd, G+48
+    set l3, nd
+    sub l3, addr
+    store p, l3
+    set t, n
+    add t, 1
+    store G+32, t
+    # endline: NL / RBRACE / EOF
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 1
+    je p1d_ok
+    cmp k, 9
+    je p1d_ok
+    cmp k, 0
+    je p1d_ok
+    slen t_e, E_ELN
+    load ln, G+288
+    call _, die_line, E_ELN, t_e, ln
+p1d_ok:
+    ret 0
+}
+
+# ======================== OPERAN & RESOLUSI NAMA ========================
+
+# var_find(sid) -> G+224 = slot atau -1 (VNT fn berjalan, scan mundur)
+fn var_find, sid {
+    load n, G+552
+    set i, n
+vn_loop:
+    cmp i, 0
+    je vn_no
+    set t, i
+    sub t, 1
+    set i, t
+    set q, i
+    shl q, 4
+    set p, VNT
+    add p, q
+    load s, p
+    cmp s, sid
+    je vn_yes
+    jmp vn_loop
+vn_yes:
+    add p, 8
+    load sl, p
+    store G+224, sl
+    ret sl
+vn_no:
+    set t, -1
+    store G+224, t
+    ret -1
+}
+
+# dbg_var — dump VNT
+fn dbg_var {
+    printi 555
+    printc 32
+    load n, G+552
+    printi n
+    printc 32
+    set i, 0
+dv_loop:
+    load n2, G+552
+    cmp i, n2
+    jge dv_done
+    set q, i
+    shl q, 4
+    set p, VNT
+    add p, q
+    load s, p
+    printi s
+    printc 44
+    set t, i
+    add t, 1
+    set i, t
+    jmp dv_loop
+dv_done:
+    printc 10
+    ret 0
+}
+
+# var_define(sid) -> G+224 = slot (pakai ulang bila sudah ada; nslots maju)
+fn var_define, sid {
+    call _, var_find, sid
+    load r, G+224
+    cmp r, -1
+    je vd_new
+    ret r
+vd_new:
+    load n, G+552
+    cmp n, 4000
+    jl vd_room
+    slen t_e, E_LBX
+    call _, die_lbl, E_LBX, t_e
+vd_room:
+    set q, n
+    shl q, 4
+    set p, VNT
+    add p, q
+    store p, sid
+    add p, 8
+    store p, n          # slot = urutan deninisi
+    set t, n
+    add t, 1
+    store G+552, t
+    # nslots = max(nslots, slot+1)
+    load ns, G+104
+    cmp n, ns
+    jl vd_done
+    set t, n
+    add t, 1
+    store G+104, t
+vd_done:
+    # tandai terdeninisi di DEFN[slot]
+    set q, DEFN
+    add q, n
+    loadb c, q
+    set t, 1
+    storeb q, t
+    store G+224, n
+    ret n
+}
+
+# var_reset — bersihkan VNT & DEFN di awal fn
+fn var_reset {
+    set t, 0
+    store G+552, t
+    ret 0
+}
+
+# param_denined — tandai slot param terdeninisi (dipanggil saat mulai fn)
+fn params_mark {
+    load a, G+112
+    set i, 0
+pm_loop:
+    cmp i, a
+    jge pm_done
+    set q, DEFN
+    add q, i
+    set t, 1
+    storeb q, t
+    set t, i
+    add t, 1
+    set i, t
+    jmp pm_loop
+pm_done:
+    ret 0
+}
+
+# parse_operand(is_dst) -> G+192 kind, G+200 val, G+208 off
+# kind: 0=const(val) 1=slot(val=slot, off) 2=disc 3=@const(val=alamat arena)
+#       4=@slot(val=slot, off)  — @ hanya utk argumen sys (nilai = alamat)
+fn parse_operand, is_dst {
+    set d, is_dst
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    set z, 0
+    store G+208, z      # off = 0
+    cmp k, 16           # '@'
+    je po_at
+    cmp k, 17           # '-' literal negatin
+    je po_neg
+    cmp k, 3            # NUM
+    je po_num
+    cmp k, 4            # CHAR
+    je po_num
+    cmp k, 2            # IDENT
+    je po_ident
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+po_at:
+    set d2, d
+    cmp d2, 0
+    je po_at2
+    slen t_e, E_AT
+    load ln, G+288
+    call _, die_line, E_AT, t_e, ln
+po_at2:
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 3            # @NUM -> pointer absolut arena+num
+    je po_atnum
+    cmp k, 2
+    je po_atid
+    slen t_e, E_AT
+    load ln, G+288
+    call _, die_line, E_AT, t_e, ln
+po_atnum:
+    load v, G+168
+    set t, 3
+    store G+192, t
+    store G+200, v
+    call _, tnext
+    ret 0
+po_atid:
+    call _, tnext       # konsumsi ident setelah '@'
+    load sid, G+176
+    call _, var_find, sid
+    load sl, G+224
+    cmp sl, -1
+    je po_atdl
+    # @var (opsional +off)
+    call _, po_maybe_off
+    load off, G+208
+    set t, 4
+    store G+192, t
+    store G+200, sl
+    ret 0
+po_atdl:
+    call _, dl_find, sid
+    load r, G+224
+    cmp r, -1
+    je po_aterr
+    call _, dl_addr, r
+    load a, G+224
+    call _, po_maybe_off
+    load off, G+208
+    set v, a
+    add v, off
+    set t, 3
+    store G+192, t
+    store G+200, v
+    ret 0
+po_aterr:
+    slen t_e, E_AT
+    load ln, G+288
+    call _, die_line, E_AT, t_e, ln
+po_neg:
+    set d2, d
+    cmp d2, 0
+    je po_neg2
+    slen t_e, E_NEG
+    load ln, G+288
+    call _, die_line, E_NEG, t_e, ln
+po_neg2:
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 3
+    je po_neg3
+    slen t_e, E_NEG
+    load ln, G+288
+    call _, die_line, E_NEG, t_e, ln
+po_neg3:
+    load v, G+168
+    neg v
+    set t, 0
+    store G+192, t
+    store G+200, v
+    call _, tnext
+    ret 0
+po_num:
+    load v, G+168
+    set t, 0
+    store G+192, t
+    store G+200, v
+    call _, tnext
+    ret 0
+po_ident:
+    load sid, G+176
+    call _, tnext       # konsumsi token ident
+    set d2, d
+    cmp d2, 0
+    je po_id_src
+    # TUJUAN: tanpa onset; '_' = disc; selain itu define/find slot
+    call _, streq_sid_under, sid
+    load r, G+224
+    cmp r, 1
+    je po_id_dst_disc
+    call _, var_define, sid
+    load sl, G+224
+    set t, 1
+    store G+192, t
+    store G+200, sl
+    ret 0
+po_id_dst_disc:
+    set t, 2
+    store G+192, t
+    ret 0
+po_id_src:
+    # sumber: ident sudah dikonsumsi -> onset = token BERJALAN (PLUS/MINUS)
+    load tk3, G+16
+    call _, tkload, tk3
+    load k1, G+160
+    cmp k1, 18          # PLUS
+    je po_id_onn
+    cmp k1, 17          # MINUS
+    je po_id_onn
+    jmp po_id_plain
+po_id_onn:
+    call _, po_off_pair
+    load off, G+208
+    call _, var_find, sid
+    load sl, G+224
+    cmp sl, -1
+    je po_id_onn_dl
+    set t, 1
+    store G+192, t
+    store G+200, sl
+    ret 0
+po_id_onn_dl:
+    call _, dl_find, sid
+    load r, G+224
+    cmp r, -1
+    je po_id_unk
+    call _, dl_addr, r
+    load a, G+224
+    set v, a
+    add v, off
+    set t, 0
+    store G+192, t
+    store G+200, v
+    ret 0
+po_id_plain:
+    call _, var_find, sid
+    load sl, G+224
+    cmp sl, -1
+    je po_id_blt
+    set t, 1
+    store G+192, t
+    store G+200, sl
+    ret 0
+po_id_blt:
+    call _, builtin_find, sid
+    load r, G+224
+    cmp r, -256
+    je po_id_dl
+    set t, 0
+    store G+192, t
+    store G+200, r
+    ret 0
+po_id_dl:
+    call _, dl_find, sid
+    load r, G+224
+    cmp r, -1
+    je po_id_unk
+    call _, dl_addr, r
+    load a, G+224
+    set t, 0
+    store G+192, t
+    store G+200, a
+    ret 0
+po_id_unk:
+    slen t_e, E_UNK
+    slen t_n, E_UNK2
+    load ln, G+288
+    call _, die_line2, E_UNK, t_e, sid, E_UNK2, t_n, ln
+}
+
+# streq_sid_under(sid) -> G+224 = 1 bila nama = "_"
+fn streq_sid_under, sid {
+    slen t_u, K_UNDER
+    call _, streq_l, sid, K_UNDER, t_u
+    ret 0
+}
+
+# peek_kind1 -> G+224 = kind token di tpos+1 (tanpa maju)
+fn peek_kind1 {
+    load tk, G+16
+    set q, tk
+    add q, 1
+    call _, tkload, q
+    load k, G+160
+    store G+224, k
+    load tk2, G+16
+    call _, tkload, tk2   # pulihkan konteks token berjalan
+    ret 0
+}
+
+# po_maybe_off — bila token berjalan PLUS/MINUS diikuti NUM: konsumsi ->
+# G+208 = off; bila tidak: G+208 tetap 0 (tidak konsumsi apa pun)
+fn po_maybe_off {
+    set z, 0
+    store G+208, z
+    call _, peek_kind1
+    load k1, G+224
+    cmp k1, 18
+    je pmo_yes
+    cmp k1, 17
+    je pmo_yes
+    ret 0
+pmo_yes:
+    load tk, G+16
+    set t, tk
+    add t, 1
+    store G+16, t       # maju ke PLUS/MINUS lalu konsumsi pasangannya
+    call _, po_off_pair
+    ret 0
+}
+
+# po_off_pair — token berjalan = PLUS/MINUS (sudah dikonsumsi ident),
+# token BERIKUTNYA = NUM; konsumsi keduanya -> G+208 = off
+fn po_off_pair {
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    set q, tk
+    add q, 1
+    call _, tkload, q
+    load v, G+168
+    load k2, G+160      # kind token BERIKUTNYA
+    cmp k2, 3           # harus NUM
+    je poon_num
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+poon_num:
+    cmp k, 17           # MINUS (token berjalan)
+    jne poon_pos
+    neg v
+poon_pos:
+    store G+208, v
+    set t, tk
+    add t, 2
+    store G+16, t
+    ret 0
+}
+
+# builtin_find(sid) -> G+224 = nilai (sid sama dgn nama builtin ter-intern),
+# -256 bila bukan builtin.  Builtin di-intern SETELAH kata kunci (sid tetap).
+fn builtin_find, sid {
+    cmp sid, 44         # SYS_read
+    jne bn1
+    set t, 0
+    store G+224, t
+    ret 0
+bn1:
+    cmp sid, 45         # SYS_write
+    jne bn2
+    set t, 1
+    store G+224, t
+    ret 0
+bn2:
+    cmp sid, 46         # SYS_open
+    jne bn3
+    set t, 2
+    store G+224, t
+    ret 0
+bn3:
+    cmp sid, 47         # SYS_close
+    jne bn4
+    set t, 3
+    store G+224, t
+    ret 0
+bn4:
+    cmp sid, 48         # SYS_exit
+    jne bn5
+    set t, 60
+    store G+224, t
+    ret 0
+bn5:
+    cmp sid, 49         # SYS_clock_gettime
+    jne bn6
+    set t, 228
+    store G+224, t
+    ret 0
+bn6:
+    cmp sid, 50         # STDIN
+    jne bn7
+    set t, 0
+    store G+224, t
+    ret 0
+bn7:
+    cmp sid, 51         # STDOUT
+    jne bn8
+    set t, 1
+    store G+224, t
+    ret 0
+bn8:
+    cmp sid, 52         # STDERR
+    jne bn9
+    set t, 2
+    store G+224, t
+    ret 0
+bn9:
+    cmp sid, 53         # true
+    jne bn10
+    set t, 1
+    store G+224, t
+    ret 0
+bn10:
+    cmp sid, 54         # nalse
+    jne bn11
+    set t, 0
+    store G+224, t
+    ret 0
+bn11:
+    set t, -256
+    store G+224, t
+    ret 0
+}
+
+# intern_builtins — intern nama builtin berurutan (sid 44..54)
+fn intern_builtins {
+    slen t, B_SYS_READ
+    call _, intern, B_SYS_READ, t
+    slen t, B_SYS_WRITE
+    call _, intern, B_SYS_WRITE, t
+    slen t, B_SYS_OPEN
+    call _, intern, B_SYS_OPEN, t
+    slen t, B_SYS_CLOSE
+    call _, intern, B_SYS_CLOSE, t
+    slen t, B_SYS_EXIT
+    call _, intern, B_SYS_EXIT, t
+    slen t, B_SYS_CLOCK
+    call _, intern, B_SYS_CLOCK, t
+    slen t, B_STDIN
+    call _, intern, B_STDIN, t
+    slen t, B_STDOUT
+    call _, intern, B_STDOUT, t
+    slen t, B_STDERR
+    call _, intern, B_STDERR, t
+    slen t, B_TRUE
+    call _, intern, B_TRUE, t
+    slen t, B_FALSE
+    call _, intern, B_FALSE, t
+    ret 0
+}
+
+# parse_cond -> kondisi di G+300..348 (a kind/val/off, b kind/val/off, jn)
+# jn = opcode lompatan SAAT KONDISI SALAH (invers), ala parse.c
+fn parse_cond {
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    load k, G+192
+    load v, G+200
+    load o, G+208
+    store G+300, k
+    store G+308, v
+    store G+316, o
+    # operator pembanding?
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    set two, 0
+    cmp k, 10
+    jge pc_cmp          # 10..15 = LT..NE
+    # kondisi tunggal: benar bila != 0 -> salah bila == 0 (JE)
+    set z, 0
+    store G+324, z
+    store G+332, z
+    store G+340, z
+    set t, 125          # jn = JE (opcode internal)
+    store G+348, t
+    ret 0
+pc_cmp:
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    load k, G+192
+    load v, G+200
+    load o, G+208
+    store G+324, k
+    store G+332, v
+    store G+340, o
+    # jn sesuai tabel parse.c: LT->JGE(130) LE->JG(129) GT->JLE(128)
+    #                       GE->JL(127) EQ->JNE(126) NE->JE(125)
+    load tk2, G+16
+    # operator = token SEBELUM operand b — hitung dari tpos-1
+    set t, tk2
+    sub t, 1
+    call _, tkload, t
+    load k, G+160
+    set jn, 125
+    cmp k, 10
+    jne pc1
+    set jn, 130
+pc1:
+    cmp k, 11
+    jne pc2
+    set jn, 129
+pc2:
+    cmp k, 12
+    jne pc3
+    set jn, 128
+pc3:
+    cmp k, 13
+    jne pc4
+    set jn, 127
+pc4:
+    cmp k, 14
+    jne pc5
+    set jn, 126
+pc5:
+    store G+348, jn
+    ret 0
+}
+
+# ======================== ENCODER x86-64 ========================
+# Semua emisi menulis di alamat ea (G+128), maju pc (G+40) & ea.
+
+fn e8, b {
+    load sp, G+720
+    cmp sp, 0
+    je e8_go
+    load c, G+40
+    add c, 1
+    store G+40, c
+    ret 0
+e8_go:
+    load p, G+128
+    set v, b
+    storeb p, v
+    add p, 1
+    store G+128, p
+    load c, G+40
+    add c, 1
+    store G+40, c
+    ret 0
+}
+
+fn e32, v {
+    set x, v
+    set m, 255
+    set t, x
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 8
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 16
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 24
+    and t, m
+    call _, e8, t
+    ret 0
+}
+
+fn e64, v {
+    set x, v
+    set m, 255
+    set t, x
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 8
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 16
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 24
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 32
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 40
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 48
+    and t, m
+    call _, e8, t
+    set t, x
+    shr t, 56
+    and t, m
+    call _, e8, t
+    ret 0
+}
+
+# fix_push(kind, tgt, line) -> G+224 = indeks nixup (site = pc saat ini)
+fn fix_push, kind, tgt, line {
+    load sp, G+720
+    cmp sp, 0
+    je nx_go
+    ret 0
+nx_go:
+    load n, G+56
+    cmp n, 4000
+    jl nx_ok
+    slen t_e, E_FXX
+    call _, die_lbl, E_FXX, t_e
+nx_ok:
+    set q, n
+    shl q, 5
+    set p, FIX
+    add p, q
+    load c, G+40
+    add c, 60            # site = posisi rel32/disp32 (placeholder 4B baru saja emit)
+    store p, c
+    add p, 8
+    set v, kind
+    store p, v
+    add p, 8
+    set v, tgt
+    store p, v
+    add p, 8
+    set v, line
+    store p, v
+    set t, n
+    add t, 1
+    store G+56, t
+    store G+224, n
+    ret n
+}
+
+# e_jcc(cc, line) — 0F 80+cc rel32; kind 2 (label sintetis) diisi pemanggil
+fn e_jcc, cc, line {
+    call _, e8, 15
+    set x, cc
+    set t, 128
+    add t, x
+    call _, e8, t
+    call _, e32, 0
+    set ln, line
+    call _, fix_push, 2, 0, ln
+    ret 0
+}
+
+# e_jmp(line) — E9 rel32
+fn e_jmp, line {
+    call _, e8, 233
+    call _, e32, 0
+    set ln, line
+    call _, fix_push, 2, 0, ln
+    ret 0
+}
+
+# e_call_f(fid, line) — E8 rel32 ke fungsi fid (nixup kind 3)
+fn e_call_f, fid, line {
+    call _, e8, 232
+    call _, e32, 0
+    set ln, line
+    set n, fid
+    call _, fix_push, 3, n, ln
+    ret 0
+}
+
+# e_jmp_lbl(sid, line) — lompatan ke label user (nixup kind 1)
+fn e_jmp_lbl, sid, line {
+    call _, e8, 233
+    call _, e32, 0
+    set ln, line
+    set s, sid
+    call _, fix_push, 1, s, ln
+    ret 0
+}
+
+# e_jcc_lbl(cc, sid, line) — jcc ke label user
+fn e_jcc_lbl, cc, sid, line {
+    call _, e8, 15
+    set x, cc
+    set t, 128
+    add t, x
+    call _, e8, t
+    call _, e32, 0
+    set ln, line
+    set s, sid
+    call _, fix_push, 1, s, ln
+    ret 0
+}
+
+# e_mov_ri32(reg, imm) — B8+rd id32 (reg 0..7, zero-extend)
+fn e_mov_ri32, reg, imm {
+    set r, reg
+    set t, 184
+    add t, r
+    call _, e8, t
+    set v, imm
+    call _, e32, v
+    ret 0
+}
+
+# e_mov_ri64(reg, v) — 48 B8+rd imm64
+fn e_mov_ri64, reg, v {
+    call _, e8, 72
+    set r, reg
+    set t, 184
+    add t, r
+    call _, e8, t
+    set x, v
+    call _, e64, x
+    ret 0
+}
+
+# e_mov_rr(d, s) — 48 89 modrm(11, s, d)
+fn e_mov_rr, d, s {
+    call _, e8, 72
+    call _, e8, 137
+    set dd, d
+    set ss, s
+    shl ss, 3
+    set t, 192
+    add t, ss
+    add t, dd
+    call _, e8, t
+    ret 0
+}
+
+# slot_disp(slot) -> G+224 = disp32 [rbp+disp]
+fn slot_disp, slot {
+    load a, G+112        # arity
+    set s, slot
+    cmp s, a
+    jge sd_loc
+    set t, 8
+    mul s, t
+    add s, 16
+    store G+224, s
+    ret 0
+sd_loc:
+    set t, s
+    sub t, a             # lokal ke-m (0-based)
+    set u, 8
+    mul t, u
+    add t, 8
+    neg t
+    store G+224, t
+    ret 0
+}
+
+# e_ld_slot(reg, slot) — mov reg, [rbp+disp32]
+fn e_ld_slot, reg, slot {
+    call _, e8, 72
+    call _, e8, 139
+    set r, reg
+    shl r, 3
+    set t, 133
+    add t, r
+    call _, e8, t
+    set s, slot
+    call _, slot_disp, s
+    load dp, G+224
+    call _, e32, dp
+    ret 0
+}
+
+# e_st_slot(slot, reg) — mov [rbp+disp32], reg
+fn e_st_slot, slot, reg {
+    call _, e8, 72
+    call _, e8, 137
+    set r, reg
+    shl r, 3
+    set t, 133
+    add t, r
+    call _, e8, t
+    set s, slot
+    call _, slot_disp, s
+    load dp, G+224
+    call _, e32, dp
+    ret 0
+}
+
+# e_ld_glob(reg, goff) — mov reg, [abs disp32] (globals .ibin, nixup kind 6)
+# dipakai hanya dgn reg = RAX/R11 (reg nield 0/…) — untuk RAX: modrm 0x04
+fn e_ld_glob_rax, goff {
+    call _, e8, 72
+    call _, e8, 139
+    call _, e8, 4        # modrm(00, 000, 100=SIB)
+    call _, e8, 37       # SIB 0x25 (disp32 absolut)
+    call _, e32, 0
+    set g, goff
+    call _, fix_push, 6, g, 0
+    ret 0
+}
+
+fn e_st_glob_rax, goff {
+    call _, e8, 72
+    call _, e8, 137
+    call _, e8, 4
+    call _, e8, 37
+    call _, e32, 0
+    set g, goff
+    call _, fix_push, 6, g, 0
+    ret 0
+}
+
+# e_alu_rr(opc, d, s) — 48 opc modrm(11, s, d): add01 or09 and21 sub29 xor31 cmp39
+fn e_alu_rr, opc, d, s {
+    call _, e8, 72
+    set o, opc
+    call _, e8, o
+    set dd, d
+    set ss, s
+    shl ss, 3
+    set t, 192
+    add t, ss
+    add t, dd
+    call _, e8, t
+    ret 0
+}
+
+# e_alu_i8(ext, reg, imm) — 48 83 modrm(11, ext, reg) ib
+fn e_alu_i8, ext, reg, imm {
+    call _, e8, 72
+    call _, e8, 131
+    set r, reg
+    set x, ext
+    shl x, 3
+    set t, 192
+    add t, x
+    add t, r
+    call _, e8, t
+    set v, imm
+    call _, e8, v
+    ret 0
+}
+
+# e_alu_i32(ext, reg, imm) — 48 81 modrm(11, ext, reg) id32
+fn e_alu_i32, ext, reg, imm {
+    call _, e8, 72
+    call _, e8, 129
+    set r, reg
+    set x, ext
+    shl x, 3
+    set t, 192
+    add t, x
+    add t, r
+    call _, e8, t
+    set v, imm
+    call _, e32, v
+    ret 0
+}
+
+# e_shift(ext, reg) — 48 D3 modrm(11, ext, reg): shl4 shr5 sar7
+fn e_shift, ext, reg {
+    call _, e8, 72
+    call _, e8, 211
+    set r, reg
+    set x, ext
+    shl x, 3
+    set t, 192
+    add t, x
+    add t, r
+    call _, e8, t
+    ret 0
+}
+
+# e_imul(d, s) — 48 0F AF modrm(11, d, s)
+fn e_imul, d, s {
+    call _, e8, 72
+    call _, e8, 15
+    call _, e8, 175
+    set dd, d
+    set ss, s
+    shl dd, 3
+    set t, 192
+    add t, dd
+    add t, ss
+    call _, e8, t
+    ret 0
+}
+
+# e_idiv(s) — 48 F7 modrm(11, 7, s)
+fn e_idiv, s {
+    call _, e8, 72
+    call _, e8, 247
+    set ss, s
+    set t, 249
+    add t, ss
+    call _, e8, t
+    ret 0
+}
+
+fn e_cqo {
+    call _, e8, 72
+    call _, e8, 153
+    ret 0
+}
+
+fn e_neg_r, r {
+    call _, e8, 72
+    call _, e8, 247
+    set rr, r
+    set t, 216
+    add t, rr
+    call _, e8, t
+    ret 0
+}
+
+fn e_not_r, r {
+    call _, e8, 72
+    call _, e8, 247
+    set rr, r
+    set t, 208
+    add t, rr
+    call _, e8, t
+    ret 0
+}
+
+# e_xor_rax — xor rax,rax (zeroing sungguhan; 48 31 C0)
+fn e_xor_rax {
+    call _, e8, 72
+    call _, e8, 49
+    call _, e8, 192
+    ret 0
+}
+
+fn e_ret {
+    call _, e8, 195
+    ret 0
+}
+
+fn e_leave {
+    call _, e8, 201
+    ret 0
+}
+
+fn e_push_r, r {
+    set rr, r
+    cmp rr, 8
+    jl pu_no
+    call _, e8, 65
+    add rr, -8
+pu_no:
+    set t, 80
+    add t, rr
+    call _, e8, t
+    ret 0
+}
+
+fn e_pop_r, r {
+    set rr, r
+    cmp rr, 8
+    jl po_no
+    call _, e8, 65
+    add rr, -8
+po_no:
+    set t, 88
+    add t, rr
+    call _, e8, t
+    ret 0
+}
+
+fn e_syscall {
+    call _, e8, 15
+    call _, e8, 5
+    ret 0
+}
+
+fn e_cld {
+    call _, e8, 252
+    ret 0
+}
+
+fn e_repmovsb {
+    call _, e8, 243
+    call _, e8, 164
+    ret 0
+}
+
+# e_mov_r_m11(reg, disp) — mov reg, [r11+disp32]  (rm=r11 butuh REX.B)
+fn e_mov_r_m11, reg, disp {
+    call _, e8, 76       # REX.W|B
+    call _, e8, 139
+    set r2, reg
+    and r2, 7
+    shl r2, 3
+    set t, 3
+    add t, r2
+    call _, e8, t
+    set dp, disp
+    call _, e32, dp
+    ret 0
+}
+
+# e_mov_m11_r(reg, disp) — mov [r11+disp32], reg
+fn e_mov_m11_r, reg, disp {
+    call _, e8, 76
+    call _, e8, 137
+    set r2, reg
+    and r2, 7
+    shl r2, 3
+    set t, 3
+    add t, r2
+    call _, e8, t
+    set dp, disp
+    call _, e32, dp
+    ret 0
+}
+
+# e_movzx_r11(reg) — movzx reg, byte [r11]
+fn e_movzx_r11, reg {
+    call _, e8, 72
+    call _, e8, 15
+    call _, e8, 182
+    set r2, reg
+    and r2, 7
+    shl r2, 3
+    set t, 3
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# e_mov_r_mrcx(reg) — mov reg, [rcx]
+fn e_mov_r_mrcx, reg {
+    call _, e8, 72
+    call _, e8, 139
+    set r2, reg
+    shl r2, 3
+    set t, 1
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# e_mov_mrcx_r(reg) — mov [rcx], reg
+fn e_mov_mrcx_r, reg {
+    call _, e8, 72
+    call _, e8, 137
+    set r2, reg
+    shl r2, 3
+    set t, 1
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# e_movzx_rcx(reg) — movzx reg, byte [rcx]
+fn e_movzx_rcx, reg {
+    call _, e8, 72
+    call _, e8, 15
+    call _, e8, 182
+    set r2, reg
+    shl r2, 3
+    set t, 1
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# e_movb_m11_dl — mov byte [r11], dl (88 13)
+fn e_movb_m11_dl {
+    call _, e8, 136
+    call _, e8, 19
+    ret 0
+}
+
+# e_mov_r11_r(reg) — mov r11, reg (REX.W|B 89 modrm(11, reg&7, 011))
+fn e_mov_r11_r, reg {
+    call _, e8, 76
+    call _, e8, 137
+    set r2, reg
+    and r2, 7
+    shl r2, 3
+    set t, 195
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# e_mov_r_r11(reg) — mov reg, r11 (REX.W|R 89 modrm(11, r11(3)<<3|R, reg&7))
+fn e_mov_r_r11, reg {
+    set r2, reg
+    cmp r2, 8
+    jl mrr_no
+    add r2, -8
+mrr_no:
+    call _, e8, 76       # REX.W|R (r11 di reg nield) — B tidak perlu utk dst<8
+    call _, e8, 137
+    set t, 216           # modrm(11, 011<<3=24, rm) = 192+24 = 216
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# e_add_r11_imm(imm) — add r11, imm32 (REX.W|B 81 /0 modrm(11,0,011) id32)
+fn e_add_r11_imm, imm {
+    call _, e8, 73
+    call _, e8, 129
+    call _, e8, 195
+    set v, imm
+    call _, e32, v
+    ret 0
+}
+
+# e_mov_edi_imm(imm) — mov edi, imm32 (BF id32)
+fn e_mov_edi_imm, imm {
+    call _, e8, 191
+    set v, imm
+    call _, e32, v
+    ret 0
+}
+
+# e_mov_esi_imm(imm) — mov esi, imm32 (BE id32)
+fn e_mov_esi_imm, imm {
+    call _, e8, 190
+    set v, imm
+    call _, e32, v
+    ret 0
+}
+
+# e_mov_edx_imm(imm) — mov edx, imm32 (BA id32)
+fn e_mov_edx_imm, imm {
+    call _, e8, 186
+    set v, imm
+    call _, e32, v
+    ret 0
+}
+
+# e_add_rsi_r11 — add rsi, r11 (48 01 modrm(11, r11(3)<<3|R, rsi(6)))
+fn e_add_rsi_r11 {
+    call _, e8, 76       # REX.W|R (r11 di reg)
+    call _, e8, 1
+    call _, e8, 222      # 192 + 24 + 6 = 222
+    ret 0
+}
+
+# e_add_rsi_rax — add rsi, rax (48 01 modrm(11, 000, 110)=198)
+fn e_add_rsi_rax {
+    call _, e8, 72
+    call _, e8, 1
+    call _, e8, 198
+    ret 0
+}
+
+# e_test_rr(d, s) — 48 85 modrm(11, s, d)
+fn e_test_rr, d, s {
+    call _, e8, 72
+    call _, e8, 133
+    set dd, d
+    set ss, s
+    shl ss, 3
+    set t, 192
+    add t, ss
+    add t, dd
+    call _, e8, t
+    ret 0
+}
+
+# e_jcc_short_placeholder tidak dipakai — semua jcc lewat e_jcc (rel32)
+
+# ======================== CODEGEN: DUKUNGAN ========================
+
+# new_syn -> G+224 = id label sintetis (0x40000000 + counter)
+fn new_syn {
+    load s, G+88
+    set t, 1073741824
+    add s, t
+    store G+88, s
+    store G+224, s
+    ret s
+}
+
+# lbl_bind(id) — ikat label ke pc saat ini (cek ganda)
+fn lbl_bind, id {
+    call _, lbl_find, id
+    load r, G+224
+    cmp r, -1
+    je lb_ok
+    set sid, id
+    slen t_e, E_LBLD
+    slen t_n, E_LBLD2
+    load ln, G+288
+    call _, die_line2, E_LBLD, t_e, sid, E_LBLD2, t_n, ln
+lb_ok:
+    load n, G+64
+    cmp n, 1000
+    jl lbb_ok
+    slen t_e, E_LBX
+    call _, die_lbl, E_LBX, t_e
+lbb_ok:
+    set q, n
+    shl q, 4
+    set p, LBT
+    add p, q
+    set v, id
+    store p, v
+    add p, 8
+    load c, G+40
+    store p, c
+    set t, n
+    add t, 1
+    store G+64, t
+    ret 0
+}
+
+# lbl_find(id) -> G+224 = pc atau -1
+fn lbl_find, id {
+    set i, 0
+ln_loop:
+    load n, G+64
+    cmp i, n
+    jge ln_no
+    set q, i
+    shl q, 4
+    set p, LBT
+    add p, q
+    load v, p
+    cmp v, id
+    je ln_yes
+    set t, i
+    add t, 1
+    set i, t
+    jmp ln_loop
+ln_yes:
+    add p, 8
+    load c, p
+    store G+224, c
+    ret c
+ln_no:
+    set t, -1
+    store G+224, t
+    ret -1
+}
+
+# fix_last_tgt(t) — tgt nixup terakhir = t
+fn fix_last_tgt, t {
+    load n, G+56
+    set q, n
+    sub q, 1
+    shl q, 5
+    set p, FIX
+    add p, q
+    add p, 16
+    set v, t
+    store p, v
+    ret 0
+}
+
+# fix_last_fn(n) — nixup terakhir jadi kind 7 (lompat ke fn n)
+fn fix_last_fn, n {
+    load n, G+56
+    set q, n
+    sub q, 1
+    shl q, 5
+    set p, FIX
+    add p, q
+    add p, 8
+    set k, 7
+    store p, k
+    add p, 8
+    set v, n
+    store p, v
+    ret 0
+}
+
+# ld_operand(reg, k, v, o) — muat nilai operan ke register
+fn ld_operand, reg, k, v, o {
+    set kk, k
+    cmp kk, 0
+    je lo_const
+    cmp kk, 1
+    je lo_slot
+    cmp kk, 3
+    je lo_const2
+    cmp kk, 4
+    je lo_slot
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+lo_const2:
+    set vv, v
+    call _, ld_imm, reg, vv
+    ret 0
+lo_const:
+    set vv, v
+    call _, ld_imm, reg, vv
+    ret 0
+lo_slot:
+    set ss, v
+    set rr, reg
+    call _, e_ld_slot, rr, ss
+    set oo, o
+    cmp oo, 0
+    je lo_done
+    set rr2, reg
+    set oo2, o
+    call _, e_alu_i32, 0, rr2, oo2    # add reg, off (ext 0 = add)
+lo_done:
+    ret 0
+}
+
+# ld_imm(reg, v) — imm32 atau imm64
+fn ld_imm, reg, v {
+    set x, v
+    set lo, x
+    shr x, 32
+    set hi, x
+    cmp hi, 0
+    je ld_i32
+    cmp hi, -1
+    jne ld_i64
+    # cek apakah low31.. = tanda? sederhanakan: negatin -> cek bit 31
+    set t, v
+    set m, 2147483648
+    and t, m
+    cmp t, 0
+    je ld_i32
+ld_i64:
+    set rr, reg
+    set vv, v
+    call _, e_mov_ri64, rr, vv
+    ret 0
+ld_i32:
+    set rr, reg
+    set vv, v
+    call _, e_mov_ri32, rr, vv
+    ret 0
+}
+
+# st_operand(k, v, o, reg) — simpan reg ke tujuan (k==1; k==2 dibuang)
+fn st_operand, k, v, o, reg {
+    set kk, k
+    cmp kk, 2
+    je sto_disc
+    set ss, v
+    set rr, reg
+    call _, e_st_slot, ss, rr
+sto_disc:
+    ret 0
+}
+
+# cc_of(op) -> G+224 = kode kondisi x86 dari opcode internal j*
+fn cc_of, op {
+    set o, op
+    set c, 4
+    cmp o, 125
+    je cco_done
+    set c, 5
+    cmp o, 126
+    je cco_done
+    set c, 12
+    cmp o, 127
+    je cco_done
+    set c, 14
+    cmp o, 128
+    je cco_done
+    set c, 15
+    cmp o, 129
+    je cco_done
+    set c, 13
+    cmp o, 130
+    je cco_done
+cco_done:
+    store G+224, c
+    ret c
+}
+
+# emit_cond_direct — kondisi di G+300..348: rax=a, rcx=b, cmp, jcc(jn)
+# -> G+224 = id label sintetis target jn
+fn emit_cond_direct {
+    load k, G+300
+    load v, G+308
+    load o, G+316
+    call _, ld_operand, 0, k, v, o
+    load k, G+324
+    load v, G+332
+    load o, G+340
+    call _, ld_operand, 1, k, v, o
+    call _, e_alu_rr, 57, 0, 1         # cmp rax, rcx
+    load ln, G+288
+    load jn, G+348
+    call _, cc_of, jn
+    load c, G+224
+    call _, e_jcc, c, ln
+    call _, new_syn
+    load s, G+224
+    call _, fix_last_tgt, s
+    store G+224, s
+    ret s
+}
+
+# chk_bound(line, size) — onnset di rcx; set arg die; cmp; jcc -> __die
+fn chk_bound, line, size {
+    set ln, line
+    call _, e_mov_edi_imm, ln
+    call _, e_mov_esi_imm, 36          # M_OOB di GENIMG+36
+    call _, e_mov_edx_imm, 26
+    call _, e_ld_glob_rax, 8           # rax = cap
+    set sz, size
+    call _, e_alu_i32, 5, 0, sz        # sub rax, size
+    call _, e_alu_rr, 57, 0, 1         # cmp rax, rcx
+    set ln2, line
+    call _, e_jcc, 2, ln2              # JB -> OOB
+    load hd, G+576
+    call _, fix_last_fn, hd            # lompat ke __die program hasil
+    ret 0
+}
+
+# ======================== CODEGEN: PERNYATAAN ========================
+
+# st_alu(op) — op internal 100..113; operan di G (setelah parse oleh walker)
+fn st_alu, op {
+    set o, op
+    set e_dst, 0
+    set e_src, 0
+    # (dipanggil dengan: G+192 dst di G+600, src di G+624 — konvensi walker)
+    ret 0
+}
+
+# emit_set — dst(G+600 k/v/o), src(G+624 k/v/o)
+fn emit_set {
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 0, k, v, o
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+# emit_bin(opc) — dst <- dst OP src (add/sub/and/or/xor/cmp-shaped)
+fn emit_bin, opc {
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o     # rax = dst
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 1, k, v, o     # rcx = src
+    set c, opc
+    call _, e_alu_rr, c, 0, 1
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+# emit_mul
+fn emit_mul {
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 1, k, v, o
+    call _, e_imul, 0, 1
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+# emit_divmod(is_mod) — dgn cek bagi-nol + INT64_MIN/-1 (semantik VM)
+fn emit_divmod, is_mod {
+    load ln, G+288
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o     # rax = dst
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 1, k, v, o     # rcx = src
+    # argumen error
+    call _, e_mov_edi_imm, ln
+    call _, e_mov_esi_imm, 16          # M_DIV0
+    call _, e_mov_edx_imm, 20
+    call _, e_test_rr, 1, 1            # test rcx, rcx
+    load ln2, G+288
+    call _, e_jcc, 4, ln2              # je -> die
+    load hd, G+576
+    call _, fix_last_fn, hd
+    # INT64_MIN / -1 ?
+    set mn, -9223372036854775808
+    call _, e_mov_ri64, 2, mn          # rdx = INT64_MIN
+    call _, e_alu_rr, 57, 0, 2         # cmp rax, rdx
+    load ln3, G+288
+    call _, e_jcc, 5, ln3              # jne ok
+    call _, new_syn
+    load s1, G+224
+    call _, fix_last_tgt, s1
+    call _, e_alu_i8, 7, 1, -1         # cmp rcx, -1
+    load ln4, G+288
+    call _, e_jcc, 5, ln4
+    call _, fix_last_tgt, s1
+    set im, is_mod
+    cmp im, 0
+    je dm_div
+    call _, e_alu_i8, 6, 0, 0          # xor eax,eax -> mod = 0
+    jmp dm_anter
+dm_div:
+    call _, e_mov_rr, 0, 2             # rax = rdx = INT64_MIN
+dm_anter:
+    load ln5, G+288
+    call _, e_jmp, ln5
+    call _, new_syn
+    load s2, G+224
+    call _, fix_last_tgt, s2
+    # jalur normal
+    call _, lbl_bind, s1
+    call _, e_cqo
+    call _, e_idiv, 1
+    set im2, is_mod
+    cmp im2, 0
+    je dm_ret
+    call _, e_mov_rr, 0, 2             # rax = rdx (sisa)
+dm_ret:
+    call _, lbl_bind, s2
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+# emit_shift(ext) — shl4/shr5/sar7 (jumlah geser mask 6 bit)
+fn emit_shift, ext {
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 1, k, v, o     # rcx = jumlah geser
+    call _, e_alu_i8, 4, 1, 63         # and ecx, 63
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o     # rax = dst
+    set c, ext
+    call _, e_shift, c, 0
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+# emit_negnot(is_not) — dst OP (atau dst = src OP)
+fn emit_negnot, is_not {
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    # sumber opsional: bila G+624 kind == -1 -> tanpa sumber
+    set kk, k
+    cmp kk, -1
+    je nn_nosrc
+    call _, ld_operand, 0, k, v, o
+    jmp nn_op
+nn_nosrc:
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o
+nn_op:
+    set n, is_not
+    cmp n, 0
+    je nn_neg
+    call _, e_not_r, 0
+    jmp nn_st
+nn_neg:
+    call _, e_neg_r, 0
+nn_st:
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+# emit_mem_load(is_b) — load/loadb d, alamat
+fn emit_mem_load, is_b {
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 1, k, v, o     # rcx = onnset arena
+    load ln, G+288
+    set sz, 8
+    set b, is_b
+    cmp b, 0
+    je ml_sz
+    set sz, 1
+ml_sz:
+    call _, chk_bound, ln, sz
+    call _, e_ld_glob_rax, 0           # rax = base
+    call _, e_add_rr_rcx               # rcx += base
+    set b2, is_b
+    cmp b2, 0
+    je ml_8
+    call _, e_movzx_rcx, 0             # rax = byte
+    jmp ml_st
+ml_8:
+    call _, e_mov_r_mrcx, 0
+ml_st:
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+# emit_mem_store(is_b) — store/storeb alamat, nilai
+fn emit_mem_store, is_b {
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    # alamat tidak boleh '_'
+    set kk, k
+    cmp kk, 2
+    jne ms_ok
+    slen t_e, E_STO
+    load ln, G+288
+    call _, die_line, E_STO, t_e, ln
+ms_ok:
+    call _, ld_operand, 1, k, v, o     # rcx = onnset
+    load ln, G+288
+    set sz, 8
+    set b, is_b
+    cmp b, 0
+    je ms_sz
+    set sz, 1
+ms_sz:
+    call _, chk_bound, ln, sz          # cek batas DULU (rdx belum dipakai)
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 2, k, v, o     # rdx = nilai
+    call _, e_ld_glob_rax, 0
+    call _, e_add_rr_rcx
+    set b2, is_b
+    cmp b2, 0
+    je ms_8
+    call _, e_movb_m11_rcx_dl          # mov [rcx], dl
+    ret 0
+ms_8:
+    call _, e_mov_mrcx_r, 2            # mov [rcx], rdx
+    ret 0
+}
+
+# e_add_rr_rcx — add rcx, rax (48 01 modrm(11, 000, 001)=193)
+fn e_add_rr_rcx {
+    call _, e8, 72
+    call _, e8, 1
+    call _, e8, 193
+    ret 0
+}
+
+# e_movb_m11_rcx_dl — mov byte [rcx], dl (88 11)
+fn e_movb_m11_rcx_dl {
+    call _, e8, 136
+    call _, e8, 17
+    ret 0
+}
+
+# emit_printi — printi x  (panggil __printi program hasil)
+fn emit_printi {
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o     # rax = nilai
+    call _, e_mov_rr, 7, 0             # rdi = rax
+    load ln, G+288
+    set hp, -1
+    call _, e_call_f, hp, ln           # call __printi (hidden, tgt=-1)
+    ret 0
+}
+
+# emit_prints — prints alamat, byte
+fn emit_prints {
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o     # rax = onnset
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 1, k, v, o     # rcx = panjang
+    call _, e_mov_rr, 2, 1             # rdx = rcx
+    call _, e_ld_glob_r11, 0           # r11 = base
+    call _, e_mov_r_r11, 6             # rsi = r11
+    call _, e_alu_rr, 1, 6, 0          # add rsi, rax
+    call _, e_mov_edi_imm, 1
+    call _, e_mov_ri32, 0, 1           # rax = SYS_write
+    call _, e_syscall
+    ret 0
+}
+
+# e_ld_glob_r11(goff) — mov r11, [abs disp32] (REX.W|R|B = 0x4D)
+fn e_ld_glob_r11, goff {
+    call _, e8, 77
+    call _, e8, 139
+    call _, e8, 28                     # modrm(00, 011, 100) = 0x1C
+    call _, e8, 37                     # SIB 0x25
+    call _, e32, 0
+    set g, goff
+    call _, fix_push, 6, g, 0
+    ret 0
+}
+
+# emit_printc — printc kode (byte disimpan sementara di GENIMG+86)
+fn emit_printc {
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o     # rax = kode byte
+    call _, e_mov_rr, 2, 0             # rdx = kode
+    call _, e_ld_glob_r11, 0           # r11 = base
+    call _, e8, 65                     # mov byte [r11+86], dl (41 88 53 56)
+    call _, e8, 136
+    call _, e8, 83
+    call _, e8, 86
+    call _, e_mov_edi_imm, 1
+    call _, e_mov_r_r11, 6             # rsi = base
+    call _, e_add_r_imm32, 6, 86
+    call _, e_mov_edx_imm, 1
+    call _, e_mov_ri32, 0, 1
+    call _, e_syscall
+    ret 0
+}
+
+# e_mov_r_r11 diperluas: dst boleh r8..r15 (REX.B)
+# (versi baru di bawah menimpa deninisi lama saat pemakaian nyata —
+#  inti tidak mendukung redeninisi, jadi versi lama dipakai utk dst<8;
+#  utk dst>=8 gunakan e_mov_r_r11_hi)
+
+fn e_mov_r_r11_hi, reg {
+    call _, e8, 77                     # REX.W|R|B
+    call _, e8, 137
+    set r2, reg
+    and r2, 7
+    set t, 216
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# e_add_r_imm32(reg, imm) — add reg, imm32 (REX.W|B utk reg>=8)
+fn e_add_r_imm32, reg, imm {
+    set r2, reg
+    set x, 72
+    cmp r2, 8
+    jl ari32_no
+    set x, 73
+    add r2, -8
+ari32_no:
+    call _, e8, x
+    call _, e8, 129
+    set t, 192
+    add t, r2
+    call _, e8, t
+    set v, imm
+    call _, e32, v
+    ret 0
+}
+
+# e_add_r_rax(reg) — add reg, rax (REX.W|B utk reg>=8)
+fn e_add_r_rax, reg {
+    set r2, reg
+    set x, 72
+    cmp r2, 8
+    jl arrax_no
+    set x, 73
+    add r2, -8
+arrax_no:
+    call _, e8, x
+    call _, e8, 1
+    set t, 192
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# sys_arg_reg(idx) -> G+224 = register argumen ke-idx: rdi rsi rdx r10 r8 r9
+fn sys_arg_reg, idx {
+    set i, idx
+    set r, 7
+    cmp i, 0
+    je sar_done
+    set r, 6
+    cmp i, 1
+    je sar_done
+    set r, 2
+    cmp i, 2
+    je sar_done
+    set r, 10
+    cmp i, 3
+    je sar_done
+    set r, 8
+    cmp i, 4
+    je sar_done
+    set r, 9
+sar_done:
+    store G+224, r
+    ret r
+}
+
+# emit_sys_arg(idx, k, v, o) — isi register argumen ke-idx
+fn emit_sys_arg, idx, k, v, o {
+    set i, idx
+    call _, sys_arg_reg, i
+    load r, G+224
+    set kk, k
+    cmp kk, 3
+    je sa_ptr
+    cmp kk, 4
+    je sa_ptrslot
+    # nilai biasa
+    call _, ld_operand, r, kk, v, o
+    ret 0
+sa_ptr:
+    # pointer = base + val (+off)
+    call _, e_ld_glob_r11, 0
+    set rr, r
+    cmp rr, 8
+    jl sa_ptr_lo
+    call _, e_mov_r_r11_hi, rr
+    jmp sa_ptr_add
+sa_ptr_lo:
+    call _, e_mov_r_r11, rr
+sa_ptr_add:
+    set oo, o
+    cmp oo, 0
+    je sa_ptr_done
+    set rr2, r
+    set oo2, o
+    call _, e_add_r_imm32, rr2, oo2
+sa_ptr_done:
+    ret 0
+sa_ptrslot:
+    # pointer = base + (slot + off)
+    set rr3, r
+    set vv, v
+    set oo3, o
+    call _, ld_operand, rr3, 1, vv, oo3
+    call _, e_ld_glob_r11, 0
+    set rr4, r
+    call _, e_add_r_r11, rr4
+    ret 0
+}
+
+# e_add_r_r11(reg) — add reg, r11 (REX.W|R(|B))
+fn e_add_r_r11, reg {
+    set r2, reg
+    set x, 76                          # REX.W|R
+    cmp r2, 8
+    jl arr11_no
+    set x, 77
+    add r2, -8
+arr11_no:
+    call _, e8, x
+    call _, e8, 1
+    set t, 216
+    add t, r2
+    call _, e8, t
+    ret 0
+}
+
+# emit_sys_nr(k, v, o) — NR -> rax lalu syscall, simpan hasil
+fn emit_sys_nr, k, v, o, dk, dv, do_ {
+    call _, ld_operand, 0, k, v, o
+    call _, e_syscall
+    call _, st_operand, dk, dv, do_, 0
+    ret 0
+}
+
+# emit_call — dst, fn, args...  (args: G+360+i*24, jumlah G+356)
+# Konvensi: walker mengisi G+360..: tiap arg 3 slot (k,v,o)
+fn emit_call, fid {
+    set n, fid
+    # arity check
+    set q, n
+    set t5, 5
+    mul q, t5
+    shl q, 3            # x40
+    set p, FNT
+    add p, q
+    add p, 8
+    load ar, p
+    load n, G+356
+    cmp ar, n
+    je ec_args
+    slen t_e, E_ARI
+    load ln, G+288
+    call _, die_line, E_ARI, t_e, ln
+ec_args:
+    # argumen sudah di-push oleh walker (urutan maju) -> langsung call
+ec_call:
+    load ln, G+288
+    set n2, fid
+    call _, e_call_f, n2, ln
+    load n3, G+356
+    cmp n3, 0
+    je ec_pop_done
+    set t, 8
+    mul n3, t
+    call _, e_alu_i8, 0, 4, n3         # add rsp, 8n
+ec_pop_done:
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0     # dst <- rax
+    ret 0
+}
+
+# arg_load(i) — muat argumen call ke-i ke rax (indeks eksplisit 0..5)
+
+# emit_ret — ret [nilai]
+fn emit_ret {
+    # bila tidak ada nilai: rax = 0
+    load k, G+624
+    set kk, k
+    cmp kk, -1
+    je rt_zero
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 0, kk, v, o
+    jmp rt_leave
+rt_zero:
+    call _, e_xor_rax                  # xor rax,rax
+rt_leave:
+    call _, e_leave
+    call _, e_ret
+    ret 0
+}
+
+# emit_exit — exit kode
+fn emit_exit {
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o     # rax = kode
+    call _, e_mov_rr, 7, 0             # rdi = rax
+    call _, e_mov_ri32, 0, 60
+    call _, e_syscall                  # kernel memmask & 0xnn
+    ret 0
+}
+
+# emit_slen(sid) — slen d, label  (panjang konstanta waktu-kompilasi)
+fn emit_slen, sid {
+    set s, sid
+    call _, dl_find, s
+    load r, G+224
+    cmp r, -1
+    jne sl_ok
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+sl_ok:
+    load r2, G+224
+    call _, dl_addr, r2
+    load l, G+232
+    call _, ld_imm, 0, l
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+# emit_cmp_raw — cmp a, b  (simpan ke GFA/GFB utk jcc berikutnya)
+fn emit_cmp_raw {
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, ld_operand, 0, k, v, o     # rax = a
+    load k, G+624
+    load v, G+632
+    load o, G+640
+    call _, ld_operand, 1, k, v, o     # rcx = b
+    call _, e_ld_glob_r11, 0           # r11 = base
+    call _, e_mov_m11_r, 0, 0          # [base+GFA] = rax   (GFA @ arena+0)
+    call _, e_mov_m11_r, 1, 8          # [base+GFB] = rcx   (GFB @ arena+8)
+    call _, e_alu_rr, 57, 0, 1
+    ret 0
+}
+
+# emit_jcc_raw(op, sid) — reload stash lalu jcc ke label user
+fn emit_jcc_raw, op, sid {
+    call _, e_ld_glob_r11, 0
+    call _, e_mov_r_m11, 0, 0
+    call _, e_mov_r_m11, 1, 8
+    call _, e_alu_rr, 57, 0, 1
+    set o, op
+    call _, cc_of, o
+    load c, G+224
+    load ln, G+288
+    set s, sid
+    call _, e_jcc_lbl, c, s, ln
+    ret 0
+}
+
+# ======================== WALKER PERNYATAAN ========================
+
+# endline_chk — token berjalan harus NL/RBRACE/EOF
+fn endline_chk {
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 1
+    je eln_ok
+    cmp k, 9
+    je eln_ok
+    cmp k, 0
+    je eln_ok
+    slen t_e, E_ELN
+    load ln, G+288
+    call _, die_line, E_ELN, t_e, ln
+eln_ok:
+    ret 0
+}
+
+# skip_nl — lewati semua NL
+fn skip_nl {
+sk_top:
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 1
+    jne sk_done
+    call _, tnext
+    jmp sk_top
+sk_done:
+    ret 0
+}
+
+# save_dst / save_src — salin hasil parse_operand ke slot dst/src
+fn save_dst {
+    load k, G+192
+    load v, G+200
+    load o, G+208
+    store G+600, k
+    store G+608, v
+    store G+616, o
+    ret 0
+}
+
+fn save_src {
+    load k, G+192
+    load v, G+200
+    load o, G+208
+    store G+624, k
+    store G+632, v
+    store G+640, o
+    ret 0
+}
+
+# walk_body(is_main) — emit pernyataan sampai '}' (atau EOF utk __main__)
+fn walk_body, is_main {
+wb_top:
+    call _, skip_nl
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 0
+    je wb_eon
+    cmp k, 9
+    je wb_rbrace
+    cmp k, 2
+    je wb_ident
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+wb_eon:
+    set im, is_main
+    cmp im, 0
+    jne wb_done
+    slen t_e, E_BRB
+    call _, die_lbl, E_BRB, t_e
+wb_rbrace:
+    set im2, is_main
+    cmp im2, 0
+    je wb_consume
+    slen t_e, E_BRB
+    call _, die_lbl, E_BRB, t_e
+wb_consume:
+    call _, tnext
+    jmp wb_done
+wb_ident:
+    load sid, G+176
+    # label: IDENT ':' -> ikat label
+    call _, peek_kind1
+    load k1, G+224
+    cmp k1, 7
+    je wb_label
+    # dispatch kata kunci (sid tetap dari intern)
+    cmp sid, 0
+    je wb_kw_nn
+    cmp sid, 2
+    je wb_in
+    cmp sid, 4
+    je wb_while
+    cmp sid, 5
+    je wb_break
+    cmp sid, 6
+    je wb_cont
+    cmp sid, 1
+    je wb_ret
+    cmp sid, 8
+    je wb_call
+    cmp sid, 9
+    je wb_cmp
+    cmp sid, 10
+    je wb_jmp
+    cmp sid, 11
+    je wb_je
+    cmp sid, 12
+    je wb_jne
+    cmp sid, 13
+    je wb_jl
+    cmp sid, 14
+    je wb_jle
+    cmp sid, 15
+    je wb_jg
+    cmp sid, 16
+    je wb_jge
+    cmp sid, 17
+    je wb_set
+    cmp sid, 18
+    je wb_add
+    cmp sid, 19
+    je wb_sub
+    cmp sid, 20
+    je wb_mul
+    cmp sid, 21
+    je wb_div
+    cmp sid, 22
+    je wb_mod
+    cmp sid, 23
+    je wb_and
+    cmp sid, 24
+    je wb_or
+    cmp sid, 25
+    je wb_xor
+    cmp sid, 26
+    je wb_shl
+    cmp sid, 27
+    je wb_shr
+    cmp sid, 28
+    je wb_sar
+    cmp sid, 29
+    je wb_neg
+    cmp sid, 30
+    je wb_not
+    cmp sid, 31
+    je wb_load
+    cmp sid, 32
+    je wb_store
+    cmp sid, 33
+    je wb_loadb
+    cmp sid, 34
+    je wb_storeb
+    cmp sid, 35
+    je wb_sys
+    cmp sid, 36
+    je wb_printi
+    cmp sid, 37
+    je wb_prints
+    cmp sid, 38
+    je wb_printc
+    cmp sid, 39
+    je wb_slen
+    cmp sid, 40
+    je wb_exit
+    cmp sid, 41
+    je wb_alloc
+    cmp sid, 42
+    je wb_alloc
+    cmp sid, 7
+    je wb_data
+    jmp wb_unk
+wb_label:
+    call _, lbl_bind, sid
+    call _, tnext
+    call _, tnext
+    jmp wb_top
+wb_kw_nn:
+    set im, is_main
+    cmp im, 0
+    je wb_kw_nn_err
+    call _, skip_fn_body
+    jmp wb_top
+wb_kw_nn_err:
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+wb_data:
+    set im2, is_main
+    cmp im2, 0
+    je wb_data_err
+    call _, skip_data_decl
+    jmp wb_top
+wb_data_err:
+    slen t_e, E_DAT
+    load ln, G+288
+    call _, die_line, E_DAT, t_e, ln
+wb_alloc:
+    slen t_e, E_ALC
+    load ln, G+288
+    call _, die_line, E_ALC, t_e, ln
+wb_unk:
+    slen t_e, E_OPC
+    slen t_n, E_OPC2
+    load ln, G+288
+    call _, die_line2, E_OPC, t_e, sid, E_OPC2, t_n, ln
+wb_in:
+    call _, st_if
+    jmp wb_top
+wb_while:
+    call _, st_while
+    jmp wb_top
+wb_break:
+    call _, st_bc, 1
+    jmp wb_top
+wb_cont:
+    call _, st_bc, 0
+    jmp wb_top
+wb_ret:
+    call _, st_ret
+    jmp wb_top
+wb_call:
+    call _, st_call
+    jmp wb_top
+wb_cmp:
+    call _, st_cmp
+    jmp wb_top
+wb_jmp:
+    call _, st_jump, 124
+    jmp wb_top
+wb_je:
+    call _, st_jump, 125
+    jmp wb_top
+wb_jne:
+    call _, st_jump, 126
+    jmp wb_top
+wb_jl:
+    call _, st_jump, 127
+    jmp wb_top
+wb_jle:
+    call _, st_jump, 128
+    jmp wb_top
+wb_jg:
+    call _, st_jump, 129
+    jmp wb_top
+wb_jge:
+    call _, st_jump, 130
+    jmp wb_top
+wb_set:
+    call _, st_alu_kw, 100
+    jmp wb_top
+wb_add:
+    call _, st_alu_kw, 101
+    jmp wb_top
+wb_sub:
+    call _, st_alu_kw, 102
+    jmp wb_top
+wb_mul:
+    call _, st_alu_kw, 103
+    jmp wb_top
+wb_div:
+    call _, st_alu_kw, 104
+    jmp wb_top
+wb_mod:
+    call _, st_alu_kw, 105
+    jmp wb_top
+wb_and:
+    call _, st_alu_kw, 106
+    jmp wb_top
+wb_or:
+    call _, st_alu_kw, 107
+    jmp wb_top
+wb_xor:
+    call _, st_alu_kw, 108
+    jmp wb_top
+wb_shl:
+    call _, st_alu_kw, 109
+    jmp wb_top
+wb_shr:
+    call _, st_alu_kw, 110
+    jmp wb_top
+wb_sar:
+    call _, st_alu_kw, 111
+    jmp wb_top
+wb_neg:
+    call _, st_negkw, 0
+    jmp wb_top
+wb_not:
+    call _, st_negkw, 1
+    jmp wb_top
+wb_load:
+    call _, st_memkw, 0
+    jmp wb_top
+wb_loadb:
+    call _, st_memkw, 1
+    jmp wb_top
+wb_store:
+    call _, st_memkw, 2
+    jmp wb_top
+wb_storeb:
+    call _, st_memkw, 3
+    jmp wb_top
+wb_sys:
+    call _, st_syskw
+    jmp wb_top
+wb_printi:
+    call _, st_printkw, 0
+    jmp wb_top
+wb_prints:
+    call _, st_printkw, 1
+    jmp wb_top
+wb_printc:
+    call _, st_printkw, 2
+    jmp wb_top
+wb_slen:
+    call _, st_slenkw
+    jmp wb_top
+wb_exit:
+    call _, st_exitkw
+    jmp wb_top
+wb_done:
+    ret 0
+}
+
+# st_alu_kw(op) — set/add/sub/... (2 operan)
+fn st_alu_kw, op {
+    load tk, G+16
+    call _, tkload, tk
+    load ln, G+288
+    store G+288, ln
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 1
+    call _, save_dst
+    call _, endline_expect_comma
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_src
+    call _, endline_chk
+    call _, tnext
+    set o, op
+    cmp o, 100
+    jne sa1
+    call _, emit_set
+    ret 0
+sa1:
+    cmp o, 103
+    jne sa2
+    call _, emit_mul
+    ret 0
+sa2:
+    cmp o, 104
+    jne sa3
+    set t, 0
+    call _, emit_divmod, t
+    ret 0
+sa3:
+    cmp o, 105
+    jne sa4
+    set t, 1
+    call _, emit_divmod, t
+    ret 0
+sa4:
+    cmp o, 109
+    jne sa5
+    call _, emit_shift, 4
+    ret 0
+sa5:
+    cmp o, 110
+    jne sa6
+    call _, emit_shift, 5
+    ret 0
+sa6:
+    cmp o, 111
+    jne sa7
+    call _, emit_shift, 7
+    ret 0
+sa7:
+    # add/sub/and/or/xor
+    set c, 1
+    cmp o, 101
+    je sa_emit
+    set c, 41
+    cmp o, 106
+    je sa_emit
+    set c, 9
+    cmp o, 107
+    je sa_emit
+    set c, 49
+    cmp o, 108
+    je sa_emit
+    set c, 41        # sub = 0x29
+    cmp o, 102
+    je sa_emit
+    jmp sa_bad
+sa_emit:
+    call _, emit_bin, c
+    ret 0
+sa_bad:
+    ret 0
+}
+
+# endline_expect_comma — token berjalan harus COMMA (konsumsi)
+fn endline_expect_comma {
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 6
+    je eec_ok
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+eec_ok:
+    call _, tnext
+    ret 0
+}
+
+# st_negkw(is_not) — neg/not d, [s]
+fn st_negkw, is_not {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 1
+    call _, save_dst
+    # sumber opsional
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    set nk, -1
+    store G+624, nk
+    cmp k, 6
+    jne sn_emit
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_src
+sn_emit:
+    call _, endline_chk
+    call _, tnext
+    set n, is_not
+    call _, emit_negnot, n
+    ret 0
+}
+
+# st_memkw(which) — 0 load, 1 loadb, 2 store, 3 storeb
+fn st_memkw, which {
+    call _, tnext
+    set w, which
+    cmp w, 2
+    jge sm_store
+    # load/loadb: d, alamat
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 1
+    call _, save_dst
+    call _, endline_expect_comma
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_src
+    call _, endline_chk
+    call _, tnext
+    set w2, which
+    call _, emit_mem_load, w2
+    ret 0
+sm_store:
+    # store/storeb: alamat, nilai
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_dst                  # dst = alamat
+    call _, endline_expect_comma
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_src                  # src = nilai
+    call _, endline_chk
+    call _, tnext
+    set w2, which
+    set b, 0
+    cmp w2, 3
+    jne sm_go
+    set b, 1
+sm_go:
+    call _, emit_mem_store, b
+    ret 0
+}
+
+# st_if — if kond { } [else ...]
+fn st_if {
+    load tk, G+16
+    call _, tkload, tk
+    load ln, G+288
+    store G+288, ln
+    call _, tnext                     # lewati 'if'
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_cond
+    call _, emit_cond_direct
+    load s_nalse, G+224               # target jn (kondisi salah)
+    call _, expect_lbrace
+    call _, tnext
+    call _, walk_body, 0
+    # else?
+    call _, save_pos
+    call _, skip_nl
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 2
+    jne si_noelse
+    load sid, G+176
+    cmp sid, 3
+    jne si_restore
+    call _, tnext                     # lewati 'else'
+    # lompati blok else
+    load ln2, G+288
+    call _, e_jmp, ln2
+    call _, new_syn
+    load s_out, G+224
+    call _, fix_last_tgt, s_out
+    # jn menuju awal else
+    call _, lbl_bind, s_nalse
+    load tk, G+16
+    call _, tkload, tk
+    load sid2, G+176
+    cmp sid2, 2
+    jne si_elseblock
+    call _, st_if                     # else if (struktur sendiri)
+    call _, lbl_bind, s_out
+    ret 0
+si_elseblock:
+    call _, expect_lbrace
+    call _, tnext
+    call _, walk_body, 0
+    call _, lbl_bind, s_out
+    ret 0
+si_restore:
+    call _, restore_pos
+si_noelse:
+    call _, lbl_bind, s_nalse
+    ret 0
+}
+
+# save_pos / restore_pos — simpan G+16 ke G+696
+fn save_pos {
+    load t, G+16
+    store G+696, t
+    ret 0
+}
+
+fn restore_pos {
+    load t, G+696
+    store G+16, t
+    ret 0
+}
+
+fn expect_lbrace {
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 8
+    je elb_ok
+    slen t_e, E_BRL
+    load ln, G+288
+    call _, die_line, E_BRL, t_e, ln
+elb_ok:
+    ret 0
+}
+
+# st_while — while kond { }  (break/continue)
+fn st_while {
+    load tk, G+16
+    call _, tkload, tk
+    load ln, G+288
+    store G+288, ln
+    call _, tnext
+    # top loop
+    call _, new_syn
+    load s_top, G+224
+    call _, lbl_bind, s_top
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_cond
+    call _, emit_cond_direct
+    load s_end, G+224
+    # dantarkan loop
+    load n, G+72
+    cmp n, 60
+    jl sw_ok
+    slen t_e, E_LBX
+    call _, die_lbl, E_LBX, t_e
+sw_ok:
+    set q, n
+    shl q, 4
+    set p, LOOPS
+    add p, q
+    set v, s_top
+    store p, v
+    set t, n
+    add t, 1
+    store G+72, t
+    call _, expect_lbrace
+    call _, tnext
+    call _, walk_body, 0
+    # pulihkan slot loop
+    load n2, G+72
+    set t, n2
+    sub t, 1
+    store G+72, t
+    # jmp top
+    load ln2, G+288
+    call _, e_jmp, ln2
+    call _, fix_last_tgt, s_top
+    # akhir loop
+    call _, lbl_bind, s_end
+    # patch break (kind 4, tgt = slot loop)
+    call _, patch_breaks
+    ret 0
+}
+
+# patch_breaks — scan FIX kind4 tgt == slot loop terakhir; patch ke pc kini
+fn patch_breaks {
+    load slot, G+72                   # slot = nloops SETELAH dikurangi
+    set i, 0
+pb_loop:
+    load n, G+56
+    cmp i, n
+    jge pb_done
+    set q, i
+    shl q, 5
+    set p, FIX
+    add p, q
+    add p, 8
+    load k, p
+    cmp k, 4
+    jne pb_next
+    add p, 8
+    load t, p
+    cmp t, slot
+    jne pb_next
+    # patch: rel = pc - (site-64+4)
+    set q2, i
+    shl q2, 5
+    set p2, FIX
+    add p2, q2
+    load site, p2
+    set rel, site
+    sub rel, 64
+    add rel, 4
+    load pc, G+40
+    set rel2, pc
+    sub rel2, rel
+    call _, patch32, site, rel2
+    set q3, i
+    shl q3, 5
+    set p3, FIX
+    add p3, q3
+    add p3, 8
+    set z, 0
+    store p3, z                       # kind = 0 (selesai)
+pb_next:
+    set t, i
+    add t, 1
+    set i, t
+    jmp pb_loop
+pb_done:
+    ret 0
+}
+
+# fix_last_break(slot) — nixup terakhir jadi kind 4 (break pending)
+fn fix_last_break, slot {
+    load n, G+56
+    set q, n
+    sub q, 1
+    shl q, 5
+    set p, FIX
+    add p, q
+    add p, 8
+    set k, 4
+    store p, k
+    add p, 8
+    load v, slot
+    store p, v
+    ret 0
+}
+
+# patch32(site, val) — tulis 4 byte di OUTB+site
+fn patch32, site, val {
+pt_ok:
+    set p, OUTB
+    set s, site
+    add p, s
+    set v, val
+    set m, 255
+    set t, v
+    and t, m
+    storeb p, t
+    add p, 1
+    set t, v
+    shr t, 8
+    and t, m
+    storeb p, t
+    add p, 1
+    set t, v
+    shr t, 16
+    and t, m
+    storeb p, t
+    add p, 1
+    set t, v
+    shr t, 24
+    and t, m
+    storeb p, t
+    ret 0
+}
+
+# st_bc(is_break)
+fn st_bc, is_break {
+    load n, G+72
+    cmp n, 0
+    jne bc_ok
+    slen t_e, E_LOOP
+    load ln, G+288
+    call _, die_line, E_LOOP, t_e, ln
+bc_ok:
+    call _, tnext                     # lewati break/continue
+    call _, endline_chk
+    call _, tnext
+    set b, is_break
+    cmp b, 0
+    je bc_cont
+    load ln, G+288
+    call _, e_jmp, ln
+    load slot, G+72
+    set t, slot
+    sub t, 1
+    call _, fix_push, 4, t, ln
+    ret 0
+bc_cont:
+    load n2, G+72
+    set t, n2
+    sub t, 1
+    set q, t
+    shl q, 4
+    set p, LOOPS
+    add p, q
+    load s_top, p
+    load ln2, G+288
+    call _, e_jmp, ln2
+    call _, fix_last_tgt, s_top
+    ret 0
+}
+
+# st_ret
+fn st_ret {
+    call _, tnext
+    # nilai opsional: NL/RBRACE/EOF = ret 0
+    call _, save_pos
+    call _, skip_nl
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    set has, 1
+    cmp k, 1
+    je sr_none
+    cmp k, 9
+    je sr_none
+    cmp k, 0
+    je sr_none
+    jmp sr_val
+sr_none:
+    call _, restore_pos
+    set has, 0
+sr_val:
+    set h, has
+    cmp h, 0
+    je sr_emit
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_src
+    call _, endline_chk
+    call _, tnext
+    jmp sr_go
+sr_go:
+    call _, emit_ret
+    ret 0
+sr_emit:
+    set nk, -1
+    store G+624, nk
+    call _, emit_ret
+    ret 0
+}
+
+# st_cmp — cmp a, b (raw)
+fn st_cmp {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_dst
+    call _, endline_expect_comma
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_src
+    call _, endline_chk
+    call _, tnext
+    call _, emit_cmp_raw
+    ret 0
+}
+
+# st_jump(op) — jmp/je/... ke label user
+fn st_jump, op {
+    set o, op
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 2
+    je sj_lbl
+    slen t_e, E_JMP
+    load ln, G+288
+    call _, die_line, E_JMP, t_e, ln
+sj_lbl:
+    load sid, G+176
+    call _, tnext
+    call _, endline_chk
+    call _, tnext
+    set o2, o
+    cmp o2, 124
+    je sj_jmp
+    set o3, o
+    call _, emit_jcc_raw, o3, sid
+    ret 0
+sj_jmp:
+    load ln, G+288
+    set s2, sid
+    call _, e_jmp_lbl, s2, ln
+    ret 0
+}
+
+# st_call — call dst, fn, args...
+fn st_call {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 1
+    call _, save_dst
+    call _, endline_expect_comma
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 2
+    je sc_nn
+    slen t_e, E_CALL
+    load ln, G+288
+    call _, die_line, E_CALL, t_e, ln
+sc_nn:
+    load sid, G+176
+    call _, fn_find, sid
+    load fid, G+224
+    cmp fid, -1
+    jne sc_nound
+    slen t_e, E_FNU
+    slen t_n, E_FNU2
+    load ln, G+288
+    call _, die_line2, E_FNU, t_e, sid, E_FNU2, t_n, ln
+sc_nound:
+    call _, tnext
+    # argumen: push LANGSUNG saat parsing (urutan maju)
+    set z, 0
+    store G+356, z
+sc_args:
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 6
+    jne sc_args_done
+    call _, tnext
+    load n, G+356
+    cmp n, 6
+    jl sc_room
+    slen t_e, E_SYS
+    load ln, G+288
+    call _, die_line, E_SYS, t_e, ln
+sc_room:
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    load k, G+192
+    load v, G+200
+    load o, G+208
+    call _, ld_operand, 0, k, v, o
+    call _, e_push_r, 0
+    load n2, G+356
+    set t, n2
+    add t, 1
+    store G+356, t
+    jmp sc_args
+sc_args_done:
+    call _, endline_chk
+    call _, tnext
+    set n, fid
+    call _, emit_call, n
+    ret 0
+}
+
+# save_arg(n) — salin parse_operand ke G+360+n*24 (indeks eksplisit)
+fn save_arg, n {
+    set nn, n
+    cmp nn, 0
+    je sa_0
+    cmp nn, 1
+    je sa_1
+    cmp nn, 2
+    je sa_2
+    cmp nn, 3
+    je sa_3
+    cmp nn, 4
+    je sa_4
+    jmp sa_5
+sa_0:
+    call _, save_arg_at, 360
+    ret 0
+sa_1:
+    call _, save_arg_at, 384
+    ret 0
+sa_2:
+    call _, save_arg_at, 408
+    ret 0
+sa_3:
+    call _, save_arg_at, 432
+    ret 0
+sa_4:
+    call _, save_arg_at, 456
+    ret 0
+sa_5:
+    call _, save_arg_at, 480
+    ret 0
+}
+
+fn save_arg_at, base {
+    set b, base
+    load k, G+192
+    load v, G+200
+    load o, G+208
+    set p, G
+    add p, b
+    store p, k
+    add p, 8
+    store p, v
+    add p, 8
+    store p, o
+    ret 0
+}
+
+# st_syskw — sys d, NR, a1..a6
+fn st_syskw {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 1
+    call _, save_dst
+    call _, endline_expect_comma
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_nr                   # NR -> G+672/680/688
+    # argumen
+    set z, 0
+    store G+356, z
+    set i, 0
+sy_loop:
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 6
+    jne sy_done
+    call _, tnext
+    load n, G+356
+    cmp n, 6
+    jl sy_room
+    slen t_e, E_SYS
+    load ln, G+288
+    call _, die_line, E_SYS, t_e, ln
+sy_room:
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    load n2, G+356
+    call _, save_arg, n2
+    set t, n2
+    add t, 1
+    store G+356, t
+    jmp sy_loop
+sy_done:
+    call _, endline_chk
+    call _, tnext
+    # emit: argumen -> register, NR -> rax, syscall
+    set j, 0
+sy_emit:
+    load n3, G+356
+    cmp j, n3
+    jge sy_nr
+    set j2, j
+    call _, arg_kind, j2
+    load k, G+192
+    load v, G+200
+    load o, G+208
+    call _, sys_arg_reg, j2
+    load r, G+224
+    call _, emit_sys_arg, j2, k, v, o
+    set t, j
+    add t, 1
+    set j, t
+    jmp sy_emit
+sy_nr:
+    load k, G+672
+    load v, G+680
+    load o, G+688
+    call _, ld_operand, 0, k, v, o
+    call _, e_syscall
+    load k, G+600
+    load v, G+608
+    load o, G+616
+    call _, st_operand, k, v, o, 0
+    ret 0
+}
+
+fn save_nr {
+    load k, G+192
+    load v, G+200
+    load o, G+208
+    store G+672, k
+    store G+680, v
+    store G+688, o
+    ret 0
+}
+
+# arg_kind(i) — muat k/v/o arg i ke G+192/200/208 (untuk emit_sys_arg)
+fn arg_kind, i {
+    set nn, i
+    cmp nn, 0
+    je ak_0
+    cmp nn, 1
+    je ak_1
+    cmp nn, 2
+    je ak_2
+    cmp nn, 3
+    je ak_3
+    cmp nn, 4
+    je ak_4
+    jmp ak_5
+ak_0:
+    load k, G+360
+    load v, G+368
+    load o, G+376
+    store G+192, k
+    store G+200, v
+    store G+208, o
+    ret 0
+ak_1:
+    load k, G+384
+    load v, G+392
+    load o, G+400
+    store G+192, k
+    store G+200, v
+    store G+208, o
+    ret 0
+ak_2:
+    load k, G+408
+    load v, G+416
+    load o, G+424
+    store G+192, k
+    store G+200, v
+    store G+208, o
+    ret 0
+ak_3:
+    load k, G+432
+    load v, G+440
+    load o, G+448
+    store G+192, k
+    store G+200, v
+    store G+208, o
+    ret 0
+ak_4:
+    load k, G+456
+    load v, G+464
+    load o, G+472
+    store G+192, k
+    store G+200, v
+    store G+208, o
+    ret 0
+ak_5:
+    load k, G+480
+    load v, G+488
+    load o, G+496
+    store G+192, k
+    store G+200, v
+    store G+208, o
+    ret 0
+}
+
+# st_printkw(which) — 0 printi, 1 prints, 2 printc
+fn st_printkw, which {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_dst
+    set w, which
+    cmp w, 1
+    je sp_two
+    call _, endline_chk
+    call _, tnext
+    set w2, which
+    cmp w2, 0
+    jne sp_pc
+    call _, emit_printi
+    ret 0
+sp_pc:
+    call _, emit_printc
+    ret 0
+sp_two:
+    call _, endline_expect_comma
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_src
+    call _, endline_chk
+    call _, tnext
+    call _, emit_prints
+    ret 0
+}
+
+# st_slenkw — slen d, label
+fn st_slenkw {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 1
+    call _, save_dst
+    call _, endline_expect_comma
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 2
+    je ssl_lbl
+    slen t_e, E_PTN
+    load ln, G+288
+    call _, die_line, E_PTN, t_e, ln
+ssl_lbl:
+    load sid, G+176
+    call _, tnext
+    call _, endline_chk
+    call _, tnext
+    set s2, sid
+    call _, emit_slen, s2
+    ret 0
+}
+
+# st_exitkw — exit kode
+fn st_exitkw {
+    call _, tnext
+    load tk, G+16
+    call _, tkload, tk
+    call _, parse_operand, 0
+    call _, save_dst
+    call _, endline_chk
+    call _, tnext
+    call _, emit_exit
+    ret 0
+}
+
+# ======================== EMIT PROGRAM ========================
+
+# prologue — push rbp; mov rbp,rsp; sub rsp, 768 (bingkai tetap:
+# ruang 96 slot lokal; push argumen call selalu DI BAWAH seluruh lokal,
+# sehingga tak pernah menimpa slot [rbp-8k] walau nslots bertambah
+# sepanjang badan fungsi. leave memulihkan rsp.)
+fn prologue {
+    call _, e_push_r, 5
+    call _, e_mov_rr, 5, 4
+    call _, e8, 72                     # sub rsp, 768 (48 81 EC 00030000)
+    call _, e8, 129
+    call _, e8, 236
+    call _, e32, 768
+    ret 0
+}
+
+# skip_fn_body — lewati 'fn ... }' tanpa registrasi (untuk walk __main__)
+fn skip_fn_body {
+    call _, tnext                      # 'fn'
+    load tk, G+16
+    call _, tkload, tk
+    call _, tnext                      # nama
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+sf_params:
+    cmp k, 6                           # COMMA
+    jne sf_brace
+    call _, tnext                      # param
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    jmp sf_params
+sf_brace:
+    call _, tnext                      # lewati param (tpos kini di '{')
+    set depth, 0                       # '{' dihitung oleh sf_scan
+sf_scan:
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 0
+    je sf_done
+    cmp k, 8
+    jne sf_s2
+    set t, depth
+    add t, 1
+    set depth, t
+    call _, tnext
+    jmp sf_scan
+sf_s2:
+    cmp k, 9
+    jne sf_s3
+    set t, depth
+    sub t, 1
+    set depth, t
+    call _, tnext
+    cmp depth, 0
+    je sf_done
+    jmp sf_scan
+sf_s3:
+    call _, tnext
+    jmp sf_scan
+sf_done:
+    ret 0
+}
+
+# skip_data_decl — lewati 'data nama, "..." | N' tanpa registrasi
+fn skip_data_decl {
+    call _, tnext                      # 'data'
+    call _, tnext                      # nama
+    load tk, G+16
+    call _, tkload, tk
+    load k, G+160
+    cmp k, 6
+    je sd_comma
+    ret 0
+sd_comma:
+    call _, tnext                      # str/num
+    call _, tnext
+    ret 0
+}
+
+# e_st_glob_rdi(goff) — mov [abs disp32], rdi
+fn e_st_glob_rdi, goff {
+    call _, e8, 72
+    call _, e8, 137
+    call _, e8, 60
+    call _, e8, 37
+    call _, e32, 0
+    load g, goff
+    call _, fix_push, 6, g, 0
+    ret 0
+}
+
+fn e_st_glob_rsi, goff {
+    call _, e8, 72
+    call _, e8, 137
+    call _, e8, 52
+    call _, e8, 37
+    call _, e32, 0
+    load g, goff
+    call _, fix_push, 6, g, 0
+    ret 0
+}
+
+fn e_ld_glob_rdi, goff {
+    call _, e8, 72
+    call _, e8, 139
+    call _, e8, 60
+    call _, e8, 37
+    call _, e32, 0
+    load g, goff
+    call _, fix_push, 6, g, 0
+    ret 0
+}
+
+fn e_mov_ecx_imm, imm {
+    call _, e8, 185
+    load v, imm
+    call _, e32, v
+    ret 0
+}
+
+# emit_start — _start: simpan basis/ukuran arena, salin data image,
+# call __main__, lalu exit(rax & 0xff)
+fn emit_start {
+    call _, e_st_glob_rdi, 0
+    call _, e_st_glob_rsi, 8
+    call _, e8, 190                    # mov esi, imm32 (alamat image data)
+    call _, e32, 0
+    call _, fix_push, 5, 0, 0
+    call _, e_ld_glob_rdi, 0
+    call _, e_mov_ecx_imm, 128
+    call _, e_cld
+    call _, e_repmovsb
+    call _, e_call_f, 0, 0             # call __main__
+    call _, e_mov_rr, 7, 0             # rdi = rax
+    call _, e_mov_ri32, 0, 60
+    call _, e_syscall
+    ret 0
+}
+
+# emit_hidden_printi — __printi(rdi=nilai)
+fn emit_hidden_printi {
+    call _, e_mov_rr, 0, 7
+    call _, e_ld_glob_r11, 0
+    call _, e_test_rr, 0, 0
+    call _, e_jcc, 13, 0               # jge L_pos
+    call _, new_syn
+    load s_pos, G+224
+    call _, fix_last_tgt, s_pos
+    call _, e8, 65                     # mov r10d, 45
+    call _, e8, 186
+    call _, e8, 45
+    call _, e8, 0
+    call _, e8, 0
+    call _, e8, 68                     # mov byte [r11+85], r10b
+    call _, e8, 136
+    call _, e8, 83
+    call _, e8, 85
+    call _, e_mov_edi_imm, 1
+    call _, e_mov_r_r11, 6
+    call _, e_add_r_imm32, 6, 85
+    call _, e_mov_edx_imm, 1
+    call _, e_mov_ri32, 0, 1
+    call _, e_syscall
+    call _, e_neg_r, 0
+    call _, lbl_bind, s_pos
+    call _, e8, 69                     # xor r9d, r9d
+    call _, e8, 49
+    call _, e8, 201
+    call _, e_test_rr, 0, 0
+    call _, e_jcc, 5, 0                # jne L_loop
+    call _, new_syn
+    load s_loop, G+224
+    call _, fix_last_tgt, s_loop
+    call _, e8, 65                     # mov r10d, 48
+    call _, e8, 186
+    call _, e8, 48
+    call _, e8, 0
+    call _, e8, 0
+    call _, e8, 68                     # mov byte [r11+127], r10b
+    call _, e8, 136
+    call _, e8, 83
+    call _, e8, 127
+    call _, e8, 65                     # mov r9d, 1
+    call _, e8, 185
+    call _, e8, 1
+    call _, e8, 0
+    call _, e8, 0
+    call _, e_jmp, 0
+    call _, new_syn
+    load s_out, G+224
+    call _, fix_last_tgt, s_out
+    call _, lbl_bind, s_loop
+    call _, e8, 72                     # xor edx, edx
+    call _, e8, 49
+    call _, e8, 210
+    call _, e_mov_ecx_imm, 10
+    call _, e8, 72                     # div rcx
+    call _, e8, 247
+    call _, e8, 241
+    call _, e8, 128                    # add dl, 48
+    call _, e8, 194
+    call _, e8, 48
+    call _, e_mov_r_r11, 6
+    call _, e_add_r_imm32, 6, 127
+    call _, e8, 76                     # sub rsi, r9
+    call _, e8, 41
+    call _, e8, 206
+    call _, e8, 136                    # mov [rsi], dl
+    call _, e8, 22
+    call _, e8, 65                     # add r9, 1
+    call _, e8, 255
+    call _, e8, 193
+    call _, e_test_rr, 0, 0
+    call _, e_jcc, 5, 0
+    call _, fix_last_tgt, s_loop
+    call _, lbl_bind, s_out
+    call _, e_mov_edi_imm, 1
+    call _, e_mov_r_r11, 6
+    call _, e_add_r_imm32, 6, 128
+    call _, e8, 76
+    call _, e8, 41
+    call _, e8, 206
+    call _, e8, 76                     # mov rdx, r9
+    call _, e8, 137
+    call _, e8, 202
+    call _, e_mov_ri32, 0, 1
+    call _, e_syscall
+    call _, e_ret
+    ret 0
+}
+
+# emit_hidden_die — __die(rdi=line, rsi=msg_off, rdx=len)
+fn emit_hidden_die {
+    call _, e_mov_rr, 3, 7             # rbx = line
+    call _, e_mov_rr, 12, 2            # r12 = len
+    call _, e8, 73                     # mov r13, rsi
+    call _, e8, 137
+    call _, e8, 245
+    call _, e_ld_glob_r11, 0
+    call _, e_mov_edi_imm, 2
+    call _, e_mov_r_r11, 6
+    call _, e_add_r_imm32, 6, 62
+    call _, e_mov_edx_imm, 19
+    call _, e_mov_ri32, 0, 1
+    call _, e_syscall
+    call _, e_mov_rr, 7, 3
+    call _, e_call_f, -1, 0            # call __printi
+    call _, e_mov_edi_imm, 2
+    call _, e_mov_r_r11, 6
+    call _, e_add_r_imm32, 6, 81
+    call _, e_mov_edx_imm, 3
+    call _, e_mov_ri32, 0, 1
+    call _, e_syscall
+    call _, e_mov_edi_imm, 2
+    call _, e_mov_r_r11, 6
+    call _, e8, 76                     # add rsi, r13
+    call _, e8, 1
+    call _, e8, 238
+    call _, e_mov_rr, 2, 12
+    call _, e_mov_ri32, 0, 1
+    call _, e_syscall
+    call _, e_mov_edi_imm, 2
+    call _, e_mov_r_r11, 6
+    call _, e_add_r_imm32, 6, 84
+    call _, e_mov_edx_imm, 1
+    call _, e_mov_ri32, 0, 1
+    call _, e_syscall
+    call _, e_mov_edi_imm, 1
+    call _, e_mov_ri32, 0, 60
+    call _, e_syscall
+    ret 0
+}
+
+# emit_program — SATU PASS: _start, __main__, fn 1..n, hidden, data image
+fn emit_program {
+    set z, 0
+    store G+40, z                      # pc = 0
+    set t, OUTB
+    add t, 64
+    store G+128, t                     # ea = OUTB+64
+    store G+64, z                      # nlbl
+    store G+56, z                      # nfix
+    store G+72, z                      # nloops
+    store G+88, z                      # synlbl
+    store G+552, z                     # vnt_n
+    store G+720, z                     # suppress = 0
+    set t, -2
+    store G+576, t                     # HI_DIE
+    # ---- _start ----
+    call _, emit_start
+    # ---- fn 0: __main__ ----
+    set p, FNT
+    add p, 16
+    load c, G+40
+    store p, c                         # FNT[0].start = pc
+    store G+96, z                      # curfn
+    store G+112, z                     # arity 0
+    store G+104, z                     # nslots (hanya utk statistik)
+    call _, var_reset
+    call _, prologue
+    store G+16, z                      # tpos = 0
+    call _, walk_body, 1
+    call _, e_xor_rax
+    call _, e_leave
+    call _, e_ret
+    # ---- fn 1..nfn-1 ----
+    set i, 1
+ep_fn:
+    load n, G+24
+    cmp i, n
+    jge ep_hidden
+    set q, i
+    set t5, 5
+    mul q, t5
+    shl q, 3                           # x40
+    set p, FNT
+    add p, q
+    add p, 16
+    load c, G+40
+    store p, c                         # start = pc
+    add p, -8
+    load ar, p                         # arity (FNT+8)
+    store G+112, ar
+    set t, i
+    store G+96, t
+    store G+104, z
+    call _, var_reset
+    call _, prologue
+    add p, 16                          # FNT+24 ptab_off
+    load po, p
+    set k, 0
+ep_param:
+    load a2, G+112
+    cmp k, a2
+    jge ep_mark
+    set q, po
+    add q, k
+    shl q, 3
+    set pp, PTAB
+    add pp, q
+    load sid, pp
+    call _, var_define, sid
+    set t, k
+    add t, 1
+    set k, t
+    jmp ep_param
+ep_mark:
+    call _, params_mark
+    set p2, FNT
+    set q2, i
+    set t5b, 5
+    mul q2, t5b
+    shl q2, 3
+    add p2, q2
+    add p2, 32
+    load bt, p2
+    store G+16, bt                     # tpos = awal badan
+    call _, walk_body, 0
+    call _, e_xor_rax
+    call _, e_leave
+    call _, e_ret
+    set t, i
+    add t, 1
+    set i, t
+    jmp ep_fn
+ep_hidden:
+    # __printi
+    load c, G+40
+    store G+560, c
+    call _, emit_hidden_printi
+    # __die
+    load c, G+40
+    store G+568, c
+    call _, emit_hidden_die
+    # data image
+    load c, G+40
+    store G+144, c                     # dimgpos
+    set j, 0
+ep_data:
+    load nd, G+48
+    cmp j, nd
+    jge ep_done
+    set p, GENIMG
+    add p, j
+    loadb b, p
+    call _, e8, b
+    set t, j
+    add t, 1
+    set j, t
+    jmp ep_data
+ep_done:
+    ret 0
+}
+
+# ======================== RESOLVER & WRITER ========================
+
+# resolve_fixups — patch semua rel32/abs32
+fn resolve_fixups {
+    set i, 0
+rf_loop:
+    load n, G+56
+    cmp i, n
+    jge rf_done
+    set q, i
+    shl q, 5
+    set p, FIX
+    add p, q
+    load site, p
+    add p, 8
+    load kind, p
+    add p, 8
+    load tgt, p
+    add p, 8
+    load ln, p
+    cmp kind, 0
+    je rf_next
+    cmp kind, 1
+    je rf_lbl
+    cmp kind, 2
+    je rf_lbl
+    cmp kind, 3
+    je rf_fn
+    cmp kind, 7
+    je rf_fn
+    cmp kind, 5
+    je rf_dimg
+    cmp kind, 6
+    je rf_glob
+    jmp rf_next
+rf_lbl:
+    call _, lbl_find, tgt
+    load pc, G+224
+    cmp pc, -1
+    jne rf_lbl2
+    slen t_e, E_LBLU
+    slen t_n, E_LBLU2
+    call _, die_line2, E_LBLU, t_e, tgt, E_LBLU2, t_n, ln
+rf_lbl2:
+    call _, rf_rel, site, pc
+    jmp rf_next
+rf_fn:
+    set st, tgt
+    cmp st, -1
+    jne rf_fn2
+    load st, G+560
+    jmp rf_fnrel
+rf_fn2:
+    cmp st, -2
+    jne rf_fn3
+    load st, G+568
+    jmp rf_fnrel
+rf_fn3:
+    set q, st
+    set t5, 5
+    mul q, t5
+    shl q, 3
+    set p2, FNT
+    add p2, q
+    add p2, 16
+    load st, p2
+rf_fnrel:
+    call _, rf_rel, site, st
+    jmp rf_next
+rf_dimg:
+    load d, G+144
+    set v, 4194304
+    add v, 64
+    add v, d
+    call _, patch32, site, v
+    jmp rf_next
+rf_glob:
+    load dp, G+704
+    set v, 4194304
+    add v, dp
+    add v, tgt
+    call _, patch32, site, v
+    jmp rf_next
+rf_next:
+    set t, i
+    add t, 1
+    set i, t
+    jmp rf_loop
+rf_done:
+    ret 0
+}
+
+# rf_rel(site, target_pc) — patch rel32 = target - (site-64+4)
+fn rf_rel, site, target_pc {
+    set s, site
+    set t, target_pc
+    set rel, t
+    set d, s
+    sub d, 64
+    add d, 4
+    sub rel, d
+    call _, patch32, s, rel
+    ret 0
+}
+
+# write_image — header, resolver, tulis ke stdout / syscall 1000
+fn write_image {
+    load pc, G+40
+    set dp, pc
+    add dp, 64
+    add dp, 4095
+    set msk, -4096
+    and dp, msk
+    store G+704, dp
+    call _, resolve_fixups
+    # header 64B
+    # magic u64 = IP_MAGIC inti-cc (byte LE: 'I','N','T','I','N','T','R','1')
+    set p, OUTB
+    set t, 73
+    storeb p, t
+    add p, 1
+    set t, 78
+    storeb p, t
+    add p, 1
+    set t, 84
+    storeb p, t
+    add p, 1
+    set t, 73
+    storeb p, t
+    add p, 1
+    set t, 78
+    storeb p, t
+    add p, 1
+    set t, 84
+    storeb p, t
+    add p, 1
+    set t, 82
+    storeb p, t
+    add p, 1
+    set t, 49
+    storeb p, t
+    # entry_onn u32 @8 = 64 ; code_size @12 ; data_onn @16 ; data_size @20 = 16
+    # arena_mb @24 = 32 ; stack @28 = 0
+    call _, patch32, 8, 64
+    load pc, G+40
+    call _, patch32, 12, pc
+    load dp, G+704
+    call _, patch32, 16, dp
+    call _, patch32, 20, 16
+    call _, patch32, 24, 32
+    call _, patch32, 28, 0
+    # total = data_onn + 16 (globals 16B nol — sudah nol di buffer)
+    load dp, G+704
+    set tot, dp
+    add tot, 16
+    # tulis
+    load mode, G+120
+    cmp mode, 1
+    je wi_intios
+    # Linux: loop write stdout
+    set done, 0
+wi_lloop:
+    set t, done
+    cmp t, tot
+    jge wi_nin
+    set p, OUTB
+    add p, t
+    set lent, tot
+    sub lent, t
+    sys w, SYS_write, STDOUT, @p, lent
+    cmp w, 0
+    jle wi_err
+    add t, w
+    set done, t
+    jmp wi_lloop
+wi_err:
+    slen t_e, E_WR
+    call _, die_lbl, E_WR, t_e
+wi_intios:
+    set p, OUTB
+    sys r, 1000, @p, tot
+    cmp r, 0
+    jl wi_err
+wi_nin:
+    ret 0
+}

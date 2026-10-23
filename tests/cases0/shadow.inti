@@ -1,0 +1,14 @@
+fn f, x {
+    set y, x
+    mul y, 2
+    ret y
+}
+call a, f, 21
+printi a
+printc 10
+set a, 5
+call b, f, a
+printi b
+printc 32
+printi a
+printc 10

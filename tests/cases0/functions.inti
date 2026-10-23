@@ -1,0 +1,15 @@
+fn tambah, a, b {
+    add r, a, b
+    ret r
+}
+fn kosong {
+    printi 777
+    printc 10
+}
+call x, tambah, 3, 4
+printi x
+printc 10
+call _, kosong
+call y, tambah, -5, 2
+printi y
+printc 10

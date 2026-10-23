@@ -128,3 +128,28 @@ Linux, satu modul demi satu modul.
 | 2 ✔ | Freestanding | jalan tanpa libc, audit ldd/readelf lulus otomatis |
 | 3 | IntiOS | boot QEMU + uji otomatis I/O, timer, 2 proses |
 | 4 | Self-hosting | Inti mengkompilasi Inti di dalam IntiOS; boot USB hardware |
+
+## Catatan kemajuan Fase 4 (self-hosting — berjalan)
+
+Mesin penyusunnya sudah dibangun dan diuji terpisah:
+
+- `tools/ibin-loader.c` — pemuat `.ibin` (ABI IntiOS) di atas Linux: memuat
+  blob di 0x400000, arena 32 MB di 0x1000000, stack 8 MB — syscall program
+  dieksekusi langsung oleh kernel Linux (nomor kompatibel). Bukti bahwa satu
+  blob `.ibin` identik berjalan di dua platform nyata (Linux + IntiOS).
+- `selfhost/intib.inti` — **compiler Inti/0 → .ibin yang ditulis 100% dalam
+  bahasa Inti** (~5.600 baris): lexer, pass1, encoder x86-64 (REX/ModRM/SIB,
+  label + fixup rel32/abs32), runtime program hasil (printi/die/bounds),
+  `_start` ABI kernel, penulis header `.ibin`, dan probe target keluaran
+  (stdout di Linux / syscall 1000 di IntiOS).
+- Perluasan bahasa: `data nama, N` (reservasi BSS) — diuji 26/26 di kedua
+  backend.
+- Rantai uji: `tests/run_tests_selfhost.sh` (paritas byte interpreter vs
+  program hasil kompilasi + titik tetap intib→intib2→intib3).
+
+Status jujur: `intib` sudah mengompilasi dan menjalankan program Inti/0
+sederhana (aritmetika, printi/printc, exit code, sys write/read, memori
+byte) dengan keluaran byte-per-byte identik dengan interpreter. Kasus dengan
+pemanggilan fungsi dan titik tetap masih menabrak bug integrasi tahap akhir
+(penetapan fixup) yang sedang dikejar — tidak ada yang disembunyikan: test
+suite self-hosting belum hijau penuh dan Fase 4 belum dinyatakan selesai.

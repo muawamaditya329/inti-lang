@@ -1,0 +1,25 @@
+set x, 42
+if x > 40 {
+    printi 1
+}
+if x == 41 {
+    printi 2
+} else {
+    printi 3
+}
+if x < 10 {
+    printi 4
+} else {
+    if x < 100 {
+        printi 5
+    } else {
+        printi 6
+    }
+}
+printc 10
+set y, 0
+if y {
+    printi 7
+}
+printi 8
+printc 10

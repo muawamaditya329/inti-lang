@@ -343,15 +343,32 @@ static void parse_data(int line) {
     int sid = T[P].sid; P++;
     if (dl_find(sid)) die(line, "label data '%s' ganda", str_get(sid));
     expect(T_COMMA, "',' setelah nama data");
-    if (!at(T_STR)) die(line, "'data' butuh string literal");
-    int64_t len = T[P].num;
-    const char *bytes = str_get(T[P].sid);
-    P++;
-    int64_t addr = PR->data_len;
-    data_push_bytes((const uint8_t*)bytes, len);
+    int64_t addr = 0, dlen = 0;
+    if (at(T_STR)) {                       /* data nama, "byte" */
+        dlen = T[P].num;
+        const char *bytes = str_get(T[P].sid);
+        P++;
+        addr = PR->data_len;
+        data_push_bytes((const uint8_t*)bytes, (size_t)dlen);
+    } else if (at(T_NUM)) {                /* data nama, N  — cadangkan N byte nol (gaya BSS) */
+        dlen = T[P].num;
+        P++;
+        if (dlen < 0 || dlen > (16LL << 20))
+            die(line, "'data' cadangan harus 0..%d byte", 16 << 20);
+        addr = PR->data_len;
+        static const uint8_t zeros[4096];
+        int64_t left = dlen;
+        while (left > 0) {
+            int64_t chunk = left > 4096 ? 4096 : left;
+            data_push_bytes(zeros, (size_t)chunk);
+            left -= chunk;
+        }
+    } else {
+        die(line, "'data' butuh string literal atau angka (jumlah byte nol)");
+    }
     PR->datalbl = xrealloc(PR->datalbl, (size_t)(PR->ndatalbl + 1) * sizeof(DataLabel*));
     DataLabel *dl = xmalloc(sizeof(DataLabel));
-    dl->name_id = sid; dl->addr = addr; dl->len = len;
+    dl->name_id = sid; dl->addr = addr; dl->len = dlen;
     PR->datalbl[PR->ndatalbl++] = dl;
     endline(line);
 }

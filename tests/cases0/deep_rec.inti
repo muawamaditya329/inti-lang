@@ -1,0 +1,12 @@
+fn turun, n {
+    if n <= 0 {
+        ret 0
+    }
+    sub n, 1
+    call r, turun, n
+    ret r
+}
+set i, 100000
+call v, turun, i
+printi v
+printc 10

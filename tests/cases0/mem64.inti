@@ -1,0 +1,16 @@
+data slot, 64
+set a, 1234567890123
+store slot, a
+load b, slot
+printi b
+printc 10
+store slot+8, -99
+load c, slot+8
+printi c
+printc 10
+set d, slot
+add d, 16
+store d, 777
+load e, slot+16
+printi e
+printc 10

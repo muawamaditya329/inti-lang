@@ -1,4 +1,4 @@
-# Spesifikasi Bahasa Inti v0.2
+# Spesifikasi Bahasa Inti v0.3
 
 > **Dua backend, satu semantik.** Sejak v0.2 setiap program Inti dapat
 > dijalankan lewat interpreter (`inti file.inti`) ATAU dikompilasi menjadi
@@ -160,9 +160,12 @@ exit kode                   # akhiri proses dengan kode keluar
 
 ```
 data nama, "byte\n"     # deklarasikan byte; nama = alamat konstanta
+data nama, N            # cadangkan N byte nol (gaya BSS), N = 0..16 MiB
 ```
 
-Boleh di mana saja (termasuk di fungsi); referensi maju didukung.
+Boleh di mana saja (termasuk di fungsi); referensi maju didukung. Bentuk
+angka (v0.3) dipakai untuk buffer kerja berukuran tetap — byte-nya nol
+dan mutable lewat loadb/storeb seperti string.
 
 ## 5. Diagnostik
 

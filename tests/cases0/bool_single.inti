@@ -1,0 +1,13 @@
+set a, 7
+if a {
+    printi 1
+}
+set b, 0
+if b {
+    printi 2
+}
+cmp a, 7
+jne salah
+printi 3
+salah:
+printc 10
